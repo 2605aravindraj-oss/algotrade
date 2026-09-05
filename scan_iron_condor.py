@@ -35,6 +35,7 @@ def main() -> None:
     parser.add_argument("--to", dest="to_date", required=True)
     parser.add_argument("--short-distance-strikes", type=int, default=1)
     parser.add_argument("--wing-width-strikes", type=int, default=4)
+    parser.add_argument("--max-dte", type=int, default=None, help="only enter within this many days of expiry")
     args = parser.parse_args()
 
     print(f"Resolving {len(args.symbols)} symbols...")
@@ -56,6 +57,7 @@ def main() -> None:
                 short_distance_strikes=args.short_distance_strikes,
                 wing_width_strikes=args.wing_width_strikes,
                 underlying_key=key,
+                max_dte=args.max_dte,
             )
             all_results[symbol] = results
             ok = [r for r in results if r.ok]

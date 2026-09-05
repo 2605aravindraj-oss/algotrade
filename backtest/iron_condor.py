@@ -127,12 +127,19 @@ def run(
     wing_width_strikes: int | None = None,
     entry_time: str = "09:15",
     underlying_key: str = UNDERLYING_KEY,
+    max_dte: int | None = None,
     access_token: str | None = None,
 ) -> list[DayResult]:
     """short_distance/wing_width are in points. If short_distance_strikes /
     wing_width_strikes are given instead, the actual point distance is
     computed per-expiry from that chain's own detected strike spacing
-    (needed for equities, whose strike steps vary widely by price)."""
+    (needed for equities, whose strike steps vary widely by price).
+
+    max_dte: if set, only enter on days within this many calendar days of
+    the nearest expiry (skip the rest) -- useful for monthly-expiry
+    underlyings (stocks) where "nearest expiry" is often weeks out and
+    there's little theta to harvest most days.
+    """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     expiries = sorted(
         upstox_client.get_expired_expiries(underlying_key, "options", access_token)
@@ -147,6 +154,12 @@ def run(
         if expiry is None:
             results.append(DayResult(date=d, expiry="", spot_915=0, atm=0, note="no expiry found"))
             continue
+        if max_dte is not None:
+            import datetime as _dt
+            dte = (_dt.date.fromisoformat(expiry) - _dt.date.fromisoformat(d)).days
+            if dte > max_dte:
+                results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note=f"dte={dte} > max_dte"))
+                continue
 
         spot_candles = upstox_client.get_historical_candles(
             underlying_key, interval="1minute", to_date=d, from_date=d
