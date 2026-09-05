@@ -19,9 +19,18 @@ import time
 from dataclasses import dataclass, field
 
 from data_sources import upstox_client
+from backtest import costs
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 LEG_SLEEP_SECONDS = 0.2
+
+# entry side, exit side for each leg role
+_LEG_SIDES = {
+    "short_call": ("SELL", "BUY"),
+    "short_put": ("SELL", "BUY"),
+    "long_call": ("BUY", "SELL"),
+    "long_put": ("BUY", "SELL"),
+}
 
 
 @dataclass
@@ -43,7 +52,9 @@ class DayResult:
     atm: float
     legs: list[Leg] = field(default_factory=list)
     pnl_points: float | None = None
-    pnl_rupees: float | None = None
+    pnl_rupees_gross: float | None = None
+    costs_rupees: float | None = None
+    pnl_rupees: float | None = None  # net of costs
     note: str = ""
 
     @property
@@ -187,8 +198,19 @@ def run(
         )
         pnl_points = entry_credit - exit_debit
         lot_size = legs[0].lot_size
+        pnl_gross = pnl_points * lot_size
+
+        fills = []
+        for leg in legs:
+            entry_side, exit_side = _LEG_SIDES[leg.role]
+            fills.append(costs.Fill(price=leg.entry_price, lot_size=leg.lot_size, side=entry_side))
+            fills.append(costs.Fill(price=leg.exit_price, lot_size=leg.lot_size, side=exit_side))
+        day_costs = costs.total_cost(fills)
+
         day_result.pnl_points = pnl_points
-        day_result.pnl_rupees = pnl_points * lot_size
+        day_result.pnl_rupees_gross = pnl_gross
+        day_result.costs_rupees = day_costs
+        day_result.pnl_rupees = pnl_gross - day_costs
         results.append(day_result)
 
     return results
@@ -199,6 +221,7 @@ def summary(results: list[DayResult]) -> str:
     if not ok:
         return "No complete trading days."
     pnls = [r.pnl_rupees for r in ok]
+    total_costs = sum(r.costs_rupees for r in ok)
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
     cum = 0.0
@@ -214,6 +237,8 @@ def summary(results: list[DayResult]) -> str:
 
     lines = [
         f"Trading days:     {len(results)} ({len(ok)} complete, {len(results) - len(ok)} skipped)",
+        f"Gross P&L:        Rs {sum(r.pnl_rupees_gross for r in ok):,.2f}",
+        f"Costs (STT/GST/etc): Rs {total_costs:,.2f}  (Rs {total_costs / len(ok):,.2f}/day)",
         f"Net P&L:          Rs {sum(pnls):,.2f}",
         f"Win rate:         {len(wins) / len(ok) * 100:.1f}%  ({len(wins)}W / {len(losses)}L)",
         f"Avg win:          Rs {(sum(wins) / len(wins)) if wins else 0:,.2f}",

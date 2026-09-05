@@ -43,7 +43,10 @@ def main() -> None:
             print(f"  {r.date}  SKIPPED ({r.note})")
             continue
         strikes = " / ".join(f"{leg.role}={leg.strike:.0f}" for leg in r.legs)
-        print(f"  {r.date}  expiry={r.expiry}  spot={r.spot_915:.2f}  {strikes}  pnl=Rs{r.pnl_rupees:>9,.2f}")
+        print(
+            f"  {r.date}  expiry={r.expiry}  spot={r.spot_915:.2f}  {strikes}  "
+            f"gross=Rs{r.pnl_rupees_gross:>9,.2f}  costs=Rs{r.costs_rupees:>7,.2f}  net=Rs{r.pnl_rupees:>9,.2f}"
+        )
 
 
 if __name__ == "__main__":

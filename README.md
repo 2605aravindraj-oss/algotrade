@@ -109,5 +109,12 @@ python run_iron_condor_backtest.py --from 2025-07-01 --to 2025-08-29 \
     --short-distance 150 --wing-width 100
 ```
 
-Prints net P&L, win rate, average win/loss, best/worst day, max drawdown,
-and the full daily trade log.
+Prints gross P&L, transaction costs, net P&L, win rate, average win/loss,
+best/worst day, max drawdown, and the full daily trade log.
+
+`backtest/costs.py` estimates real Indian F&O options transaction costs
+per fill (2025/26 rates): flat Rs 20/order brokerage, STT (0.1% of premium,
+sell side only), exchange transaction charges (~0.035%, both sides), SEBI
+turnover fee, stamp duty (0.003%, buy side only), and 18% GST on
+brokerage+exchange+SEBI. All 8 fills/day (4 legs x entry+exit) are costed
+and netted against gross P&L.
