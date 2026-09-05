@@ -36,6 +36,33 @@ def get_historical_candles(
     return resp.json()
 
 
+def get_daily_history(
+    instrument_key: str,
+    from_date: str | date,
+    to_date: str | date | None = None,
+) -> list[dict]:
+    """Fetch daily candles as a list of dicts sorted oldest-to-newest.
+
+    Each dict has keys: date, open, high, low, close, volume, oi.
+    """
+    raw = get_historical_candles(instrument_key, interval="day", to_date=to_date, from_date=from_date)
+    candles = raw["data"]["candles"]
+    parsed = [
+        {
+            "date": c[0][:10],
+            "open": c[1],
+            "high": c[2],
+            "low": c[3],
+            "close": c[4],
+            "volume": c[5],
+            "oi": c[6],
+        }
+        for c in candles
+    ]
+    parsed.sort(key=lambda c: c["date"])
+    return parsed
+
+
 def get_quotes(instrument_keys: list[str], access_token: str | None = None) -> dict:
     """Fetch live market quotes. Requires a valid OAuth access token."""
     token = access_token or os.environ.get("UPSTOX_ACCESS_TOKEN")
