@@ -1,0 +1,54 @@
+"""Minimal client for Upstox's public and authenticated market-data endpoints.
+
+Historical candles are served without authentication. Live quotes and order
+placement require an OAuth access token (see https://upstox.com/developer/api-documentation/authentication)
+passed via the UPSTOX_ACCESS_TOKEN environment variable or the access_token argument.
+"""
+from __future__ import annotations
+
+import os
+from datetime import date
+from urllib.parse import quote
+
+import requests
+
+BASE_URL = "https://api.upstox.com/v2"
+TIMEOUT = 15
+
+
+def get_historical_candles(
+    instrument_key: str,
+    interval: str = "day",
+    to_date: str | date | None = None,
+    from_date: str | date | None = None,
+) -> dict:
+    """Fetch OHLC candles for an instrument. No auth required.
+
+    instrument_key example: "NSE_EQ|INE002A01018" (Reliance Industries).
+    interval: one of "day", "week", "month", "30minute", "1minute", ...
+    """
+    to_date = to_date or date.today().isoformat()
+    path = f"{BASE_URL}/historical-candle/{quote(instrument_key, safe='')}/{interval}/{to_date}"
+    if from_date:
+        path += f"/{from_date}"
+    resp = requests.get(path, timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_quotes(instrument_keys: list[str], access_token: str | None = None) -> dict:
+    """Fetch live market quotes. Requires a valid OAuth access token."""
+    token = access_token or os.environ.get("UPSTOX_ACCESS_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Upstox live quotes require an access token. Set UPSTOX_ACCESS_TOKEN "
+            "or pass access_token explicitly."
+        )
+    resp = requests.get(
+        f"{BASE_URL}/market-quote/quotes",
+        params={"symbol": ",".join(instrument_keys)},
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()
