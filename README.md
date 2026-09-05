@@ -1,9 +1,9 @@
 # algotrade
 
-Historical data + backtesting toolkit for strategies traded through
-[Upstox](https://upstox.com). Fetches OHLCV candles via the Upstox API,
-runs pluggable strategies against them, and reports performance metrics
-(returns, Sharpe, drawdown, win rate).
+Historical data + backtesting toolkit for equity/F&O strategies. Fetches
+OHLCV candles (from Yahoo Finance by default, or Upstox), runs pluggable
+strategies against them, and reports performance metrics (returns, Sharpe,
+drawdown, win rate).
 
 This is a **backtesting** tool — it does not place live orders.
 
@@ -13,6 +13,13 @@ This is a **backtesting** tool — it does not place live orders.
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+Yahoo Finance (the default data source) needs no credentials — you can run a
+backtest right away. Upstox is only needed if you pass `--source upstox`
+(e.g. for segments or instruments Yahoo doesn't cover well):
+
+```bash
 cp .env.example .env
 ```
 
@@ -27,13 +34,11 @@ UPSTOX_ACCESS_TOKEN=...
 ```
 
 `UPSTOX_ACCESS_TOKEN` is the short-lived (single trading day) token produced
-by completing Upstox's OAuth login flow. The historical-candle endpoint used
-here generally works without a token too, but supplying one avoids rate
-limits on the anonymous tier.
+by completing Upstox's OAuth login flow.
 
 ## Usage
 
-Download and cache historical candles:
+Download and cache historical candles (Yahoo Finance, no token needed):
 
 ```bash
 python -m algotrade.cli fetch-data --symbol RELIANCE --exchange NSE_EQ \
@@ -48,6 +53,11 @@ python -m algotrade.cli backtest --symbol RELIANCE --exchange NSE_EQ \
     --strategy sma_crossover --fast 20 --slow 50 \
     --capital 100000 --commission-bps 5 --plot equity.png
 ```
+
+Add `--source upstox` to either command to fetch from Upstox instead (requires
+`UPSTOX_ACCESS_TOKEN` in `.env`). For Indian equities, `--exchange NSE_EQ` /
+`BSE_EQ` gets mapped to the right Yahoo ticker suffix (`.NS` / `.BO`)
+automatically; for a US ticker like `AAPL`, `--exchange` is ignored.
 
 Available strategies (`--strategy`):
 
@@ -64,8 +74,9 @@ a refresh.
 algotrade/
   config.py          # loads Upstox credentials from .env
   instruments.py      # resolves trading symbols to Upstox instrument_keys
-  upstox_client.py    # historical-candle REST client
-  data.py              # fetch + cache OHLCV as a pandas DataFrame
+  upstox_client.py    # Upstox historical-candle REST client
+  yahoo_client.py      # Yahoo Finance historical-candle client (default, no token)
+  data.py               # fetch + cache OHLCV as a pandas DataFrame, dispatches by --source
   strategies/          # pluggable Strategy classes
   backtest/
     engine.py           # vectorized backtest loop

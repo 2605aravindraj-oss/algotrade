@@ -38,6 +38,12 @@ def _add_common_data_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--interval", default="day", choices=["1minute", "30minute", "day", "week", "month"])
     parser.add_argument("--start", required=True, type=_parse_date)
     parser.add_argument("--end", required=True, type=_parse_date)
+    parser.add_argument(
+        "--source",
+        default="yahoo",
+        choices=["yahoo", "upstox"],
+        help="Historical data source. 'yahoo' needs no API token; 'upstox' requires UPSTOX_ACCESS_TOKEN.",
+    )
     parser.add_argument("--no-cache", action="store_true", help="Bypass the local data cache")
 
 
@@ -73,11 +79,12 @@ def main(argv: list[str] | None = None) -> int:
         end=args.end,
         exchange=args.exchange,
         interval=args.interval,
+        source=args.source,
         use_cache=not args.no_cache,
     )
 
     if args.command == "fetch-data":
-        print(f"Fetched {len(df)} candles for {args.symbol} ({args.exchange}, {args.interval}).")
+        print(f"Fetched {len(df)} candles for {args.symbol} ({args.exchange}, {args.interval}, source={args.source}).")
         print(df.tail())
         return 0
 
