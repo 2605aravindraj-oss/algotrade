@@ -64,3 +64,16 @@ python run_structure_backtest.py --instrument "NSE_EQ|INE002A01018" \
 The script prints performance vs. buy & hold and every detected setup
 (downtrend high, higher low, breakout, retest, entry/exit), including ones
 that were invalidated before triggering a trade.
+
+## Scanning multiple stocks
+
+`data_sources/instruments.py` resolves NSE trading symbols (e.g. "TCS") to
+Upstox instrument keys using Upstox's public instrument master (cached in
+the OS temp dir for 24h). `scan_structure_reversal.py` runs the structure
+reversal backtest across a basket of symbols and prints a comparison
+table:
+
+```
+python scan_structure_reversal.py TCS INFY HDFCBANK RELIANCE
+python scan_structure_reversal.py   # defaults to a 20-stock large-cap basket
+```
