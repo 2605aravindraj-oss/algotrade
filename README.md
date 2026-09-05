@@ -118,3 +118,32 @@ sell side only), exchange transaction charges (~0.035%, both sides), SEBI
 turnover fee, stamp duty (0.003%, buy side only), and 18% GST on
 brokerage+exchange+SEBI. All 8 fills/day (4 legs x entry+exit) are costed
 and netted against gross P&L.
+
+`iron_condor.run()` also takes `underlying_key` (any NSE_EQ/NSE_INDEX
+instrument, not just NIFTY), `short_distance_strikes`/`wing_width_strikes`
+(auto-detects each chain's real strike spacing instead of a fixed point
+distance -- needed for equities, whose steps vary a lot by price), and
+`max_dte` (only enter within N days of expiry -- useful for monthly-expiry
+underlyings like individual stocks, where "nearest expiry" is otherwise
+often weeks out with little theta to harvest). `scan_iron_condor.py` runs
+the same backtest across a basket of stocks.
+
+## Local data cache
+
+`data_sources/cache.py` is a SQLite cache (`data/market_cache.db`,
+committed to the repo) sitting in front of the Upstox calls that dominate
+backtest runtime -- per-contract 1-minute candles, option chains, expiry
+lists. Check the cache first, only hit the live API for what's missing,
+persist the result. A backtest re-run over already-cached data drops from
+minutes to under 2 seconds, with identical results.
+
+The repo currently ships NIFTY 50 index option data pre-cached for
+2026-05-01 to 2026-09-01 (both the 150pt/100pt and 50pt/200pt short/wing
+configs used in `run_iron_condor_backtest.py`'s examples) -- those specific
+backtests run instantly with no token needed. Anything outside that
+range/underlying/strikes still needs `UPSTOX_ACCESS_TOKEN` for the first
+fetch, after which it's cached too.
+
+`data_sources/upstox_client.py` retries every API call up to 4 times
+(2s/4s/8s/16s backoff) on timeouts/connection errors, so a long backfill
+survives transient network issues instead of losing all its progress.
