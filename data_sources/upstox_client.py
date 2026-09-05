@@ -7,6 +7,7 @@ passed via the UPSTOX_ACCESS_TOKEN environment variable or the access_token argu
 from __future__ import annotations
 
 import os
+import time
 from datetime import date
 from urllib.parse import quote
 
@@ -14,6 +15,22 @@ import requests
 
 BASE_URL = "https://api.upstox.com/v2"
 TIMEOUT = 15
+RETRY_BACKOFF_SECONDS = (2, 4, 8, 16)
+
+
+def _get_with_retry(url: str, **kwargs) -> requests.Response:
+    """GET with retry on transient network errors (timeouts, connection
+    resets) using exponential backoff. Does not retry on HTTP error status
+    codes -- those are real API responses, not transient failures."""
+    last_exc = None
+    for attempt, delay in enumerate((0,) + RETRY_BACKOFF_SECONDS):
+        if delay:
+            time.sleep(delay)
+        try:
+            return requests.get(url, timeout=TIMEOUT, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+    raise last_exc
 
 
 def get_historical_candles(
@@ -31,7 +48,7 @@ def get_historical_candles(
     path = f"{BASE_URL}/historical-candle/{quote(instrument_key, safe='')}/{interval}/{to_date}"
     if from_date:
         path += f"/{from_date}"
-    resp = requests.get(path, timeout=TIMEOUT)
+    resp = _get_with_retry(path)
     resp.raise_for_status()
     return resp.json()
 
@@ -71,11 +88,10 @@ def get_quotes(instrument_keys: list[str], access_token: str | None = None) -> d
             "Upstox live quotes require an access token. Set UPSTOX_ACCESS_TOKEN "
             "or pass access_token explicitly."
         )
-    resp = requests.get(
+    resp = _get_with_retry(
         f"{BASE_URL}/market-quote/quotes",
         params={"symbol": ",".join(instrument_keys)},
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        timeout=TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
@@ -95,11 +111,10 @@ def get_expired_expiries(
     underlying_key: str, expiry_type: str = "options", access_token: str | None = None
 ) -> list[str]:
     """List past expiry dates for an underlying's options/futures. Requires auth."""
-    resp = requests.get(
+    resp = _get_with_retry(
         f"{BASE_URL}/expired-instruments/expiries",
         params={"instrument_key": underlying_key, "expiry_type": expiry_type},
         headers=_auth_headers(access_token),
-        timeout=TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()["data"]
@@ -109,11 +124,10 @@ def get_expired_option_chain(
     underlying_key: str, expiry_date: str | date, access_token: str | None = None
 ) -> list[dict]:
     """List expired option contracts (all strikes/CE+PE) for one expiry. Requires auth."""
-    resp = requests.get(
+    resp = _get_with_retry(
         f"{BASE_URL}/expired-instruments/option/contract",
         params={"instrument_key": underlying_key, "expiry_date": str(expiry_date)},
         headers=_auth_headers(access_token),
-        timeout=TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()["data"]
@@ -130,6 +144,6 @@ def get_expired_candles(
     Requires auth. Returns raw candle rows, newest first.
     """
     path = f"{BASE_URL}/expired-instruments/historical-candle/{quote(expired_instrument_key, safe='')}/{interval}/{to_date}/{from_date}"
-    resp = requests.get(path, headers=_auth_headers(access_token), timeout=TIMEOUT)
+    resp = _get_with_retry(path, headers=_auth_headers(access_token))
     resp.raise_for_status()
     return resp.json()["data"]["candles"]
