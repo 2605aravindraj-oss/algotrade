@@ -1,14 +1,17 @@
-"""Daily intraday iron condor backtest on NIFTY 50 weekly options.
+"""Daily intraday long call butterfly backtest.
 
-Every trading day: enter a 4-leg iron condor at ~09:15 using whichever
-weekly expiry is nearest (>= that day), square off all four legs at the
-day's last traded price (~15:29/market close). Strikes are chosen relative
-to the day's 09:15 spot price.
+Every trading day: enter a 3-strike call butterfly at ~09:15 using
+whichever expiry is nearest (>= that day), square off all legs at the
+day's last traded price (~15:29/market close). Strikes are chosen
+relative to the day's 09:15 spot price:
 
-    short call = ATM + short_distance          (sell)
-    short put  = ATM - short_distance          (sell)
-    long call  = short call + wing_width       (buy, protection)
-    long put   = short put  - wing_width       (buy, protection)
+    buy  1x lower call   (ATM - wing_width)
+    sell 2x middle call  (ATM)
+    buy  1x upper call   (ATM + wing_width)
+
+This is a net-debit, defined-risk structure: max loss is the debit paid
+(if price finishes far from the middle strike), max profit is at the
+middle strike, capped at (wing_width - debit) per share.
 
 Requires an Upstox access token (expired-instruments API) since every
 expiry involved is, by the time this runs, in the past.
@@ -19,25 +22,25 @@ from dataclasses import dataclass, field
 
 from data_sources import upstox_client, cache
 from backtest import costs, options_common as oc
+from backtest.iron_condor import UNDERLYING_KEY
 
-UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
-
-# entry side, exit side for each leg role
+# entry side, exit side for each leg role. middle_call trades 2x quantity.
 _LEG_SIDES = {
-    "short_call": ("SELL", "BUY"),
-    "short_put": ("SELL", "BUY"),
-    "long_call": ("BUY", "SELL"),
-    "long_put": ("BUY", "SELL"),
+    "lower_call": ("BUY", "SELL"),
+    "middle_call": ("SELL", "BUY"),
+    "upper_call": ("BUY", "SELL"),
 }
+_LEG_QTY_MULTIPLIER = {"lower_call": 1, "middle_call": 2, "upper_call": 1}
 
 
 @dataclass
 class Leg:
-    role: str  # short_call | short_put | long_call | long_put
+    role: str  # lower_call | middle_call | upper_call
     strike: float
     trading_symbol: str
     instrument_key: str
     lot_size: int
+    qty_multiplier: int
     entry_price: float | None = None
     exit_price: float | None = None
 
@@ -59,29 +62,36 @@ class DayResult:
     def ok(self) -> bool:
         return self.pnl_points is not None
 
+    @property
+    def entry_debit(self) -> float | None:
+        """Points paid to enter (positive = net debit, the normal case)."""
+        if not self.ok:
+            return None
+        by_role = {leg.role: leg for leg in self.legs}
+        return (
+            by_role["lower_call"].entry_price
+            + by_role["upper_call"].entry_price
+            - 2 * by_role["middle_call"].entry_price
+        )
+
 
 def run(
     from_date: str,
     to_date: str,
-    short_distance: int = 150,
     wing_width: int = 100,
     strike_step: int = 50,
-    short_distance_strikes: int | None = None,
     wing_width_strikes: int | None = None,
     entry_time: str = "09:15",
     underlying_key: str = UNDERLYING_KEY,
     max_dte: int | None = None,
     access_token: str | None = None,
 ) -> list[DayResult]:
-    """short_distance/wing_width are in points. If short_distance_strikes /
-    wing_width_strikes are given instead, the actual point distance is
-    computed per-expiry from that chain's own detected strike spacing
-    (needed for equities, whose strike steps vary widely by price).
+    """wing_width is in points. If wing_width_strikes is given instead, the
+    actual point distance is computed per-expiry from that chain's own
+    detected strike spacing (needed for equities).
 
     max_dte: if set, only enter on days within this many calendar days of
-    the nearest expiry (skip the rest) -- useful for monthly-expiry
-    underlyings (stocks) where "nearest expiry" is often weeks out and
-    there's little theta to harvest most days.
+    the nearest expiry.
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     expiries = sorted(
@@ -104,9 +114,7 @@ def run(
                 results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note=f"dte={dte} > max_dte"))
                 continue
 
-        spot_candles = cache.get_day_candles_cached(
-            underlying_key, "1minute", d, expired=False
-        )
+        spot_candles = cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False)
         entry_bar = oc.nearest_bar(spot_candles, "first")
         if entry_bar is None:
             results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note="no spot data"))
@@ -122,21 +130,18 @@ def run(
             results.append(DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=0, note="empty chain"))
             continue
 
-        if short_distance_strikes is not None:
+        if wing_width_strikes is not None:
             step = oc.detect_strike_step(lookup, spot_915)
             atm = oc.round_to_step(spot_915, step)
-            eff_short_distance = short_distance_strikes * step
             eff_wing_width = wing_width_strikes * step
         else:
             atm = oc.round_to_step(spot_915, strike_step)
-            eff_short_distance = short_distance
             eff_wing_width = wing_width
 
         wanted = [
-            ("short_call", atm + eff_short_distance, "CE"),
-            ("short_put", atm - eff_short_distance, "PE"),
-            ("long_call", atm + eff_short_distance + eff_wing_width, "CE"),
-            ("long_put", atm - eff_short_distance - eff_wing_width, "PE"),
+            ("lower_call", atm - eff_wing_width, "CE"),
+            ("middle_call", atm, "CE"),
+            ("upper_call", atm + eff_wing_width, "CE"),
         ]
 
         legs: list[Leg] = []
@@ -153,10 +158,15 @@ def run(
                     trading_symbol=contract["trading_symbol"],
                     instrument_key=contract["instrument_key"],
                     lot_size=contract["lot_size"],
+                    qty_multiplier=_LEG_QTY_MULTIPLIER[role],
                 )
             )
         if missing:
             results.append(DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=atm, note="strike not found in chain"))
+            continue
+        if len({legs[0].strike, legs[1].strike, legs[2].strike}) < 3:
+            # too close to a chain edge / too-narrow wing for 3 distinct strikes
+            results.append(DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=atm, note="degenerate strikes"))
             continue
 
         day_result = DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=atm, legs=legs)
@@ -179,27 +189,27 @@ def run(
             continue
 
         by_role = {leg.role: leg for leg in legs}
-        entry_credit = (
-            by_role["short_call"].entry_price
-            + by_role["short_put"].entry_price
-            - by_role["long_call"].entry_price
-            - by_role["long_put"].entry_price
+        entry_value = (
+            by_role["lower_call"].entry_price
+            + by_role["upper_call"].entry_price
+            - 2 * by_role["middle_call"].entry_price
         )
-        exit_debit = (
-            by_role["short_call"].exit_price
-            + by_role["short_put"].exit_price
-            - by_role["long_call"].exit_price
-            - by_role["long_put"].exit_price
+        exit_value = (
+            by_role["lower_call"].exit_price
+            + by_role["upper_call"].exit_price
+            - 2 * by_role["middle_call"].exit_price
         )
-        pnl_points = entry_credit - exit_debit
+        # Long the structure: profit = what it's worth at exit minus what was paid.
+        pnl_points = exit_value - entry_value
         lot_size = legs[0].lot_size
         pnl_gross = pnl_points * lot_size
 
         fills = []
         for leg in legs:
             entry_side, exit_side = _LEG_SIDES[leg.role]
-            fills.append(costs.Fill(price=leg.entry_price, lot_size=leg.lot_size, side=entry_side))
-            fills.append(costs.Fill(price=leg.exit_price, lot_size=leg.lot_size, side=exit_side))
+            qty = leg.lot_size * leg.qty_multiplier
+            fills.append(costs.Fill(price=leg.entry_price, lot_size=qty, side=entry_side))
+            fills.append(costs.Fill(price=leg.exit_price, lot_size=qty, side=exit_side))
         day_costs = costs.total_cost(fills)
 
         day_result.pnl_points = pnl_points

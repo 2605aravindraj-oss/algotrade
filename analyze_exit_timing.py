@@ -14,23 +14,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import time
 
-from backtest.iron_condor import (
-    UNDERLYING_KEY,
-    _round_to_step,
-    _build_chain_lookup,
-    _nearest_contract,
-    _nearest_bar,
-)
-from data_sources import upstox_client
-
-LEG_SLEEP_SECONDS = 0.2
+from backtest import options_common as oc
+from backtest.iron_condor import UNDERLYING_KEY
+from data_sources import cache, upstox_client
 
 
 def run(from_date: str, to_date: str, short_distance: int, wing_width: int, early_time: str):
     trading_days = upstox_client.get_daily_history(UNDERLYING_KEY, from_date, to_date)
-    expiries = sorted(upstox_client.get_expired_expiries(UNDERLYING_KEY, "options"))
+    expiries = sorted(cache.get_expired_expiries_cached(UNDERLYING_KEY, "options"))
     chain_cache: dict[str, dict] = {}
     rows = []
 
@@ -40,17 +32,15 @@ def run(from_date: str, to_date: str, short_distance: int, wing_width: int, earl
         if expiry is None:
             continue
 
-        spot_candles = upstox_client.get_historical_candles(
-            UNDERLYING_KEY, interval="1minute", to_date=d, from_date=d
-        )["data"]["candles"]
-        entry_bar = _nearest_bar(spot_candles, "09:15", "first")
+        spot_candles = cache.get_day_candles_cached(UNDERLYING_KEY, "1minute", d, expired=False)
+        entry_bar = oc.nearest_bar(spot_candles, "first")
         if entry_bar is None:
             continue
-        atm = _round_to_step(entry_bar[1], 50)
+        atm = oc.round_to_step(entry_bar[1], 50)
 
         if expiry not in chain_cache:
-            chain_cache[expiry] = _build_chain_lookup(
-                upstox_client.get_expired_option_chain(UNDERLYING_KEY, expiry)
+            chain_cache[expiry] = oc.build_chain_lookup(
+                cache.get_expired_option_chain_cached(UNDERLYING_KEY, expiry)
             )
         lookup = chain_cache[expiry]
 
@@ -63,7 +53,7 @@ def run(from_date: str, to_date: str, short_distance: int, wing_width: int, earl
         legs = []
         missing = False
         for role, strike, opt_type in wanted:
-            contract = _nearest_contract(lookup, strike, opt_type)
+            contract = oc.nearest_contract(lookup, strike, opt_type)
             if contract is None:
                 missing = True
                 break
@@ -74,18 +64,16 @@ def run(from_date: str, to_date: str, short_distance: int, wing_width: int, earl
         leg_data = {}
         incomplete = False
         for role, contract in legs:
-            candles = upstox_client.get_expired_candles(
-                contract["instrument_key"], "1minute", d, d
+            candles = cache.get_day_candles_cached(
+                contract["instrument_key"], "1minute", d, expired=True
             )
-            time.sleep(LEG_SLEEP_SECONDS)
-            entry = _nearest_bar(candles, "09:15", "first")
-            exit_true = _nearest_bar(candles, "09:15", "last")
+            entry = oc.nearest_bar(candles, "first")
+            exit_true = oc.nearest_bar(candles, "last")
             # temporarily shrink the close cutoff for the "early" read
-            import backtest.iron_condor as ic_module
-            orig_close = ic_module.MARKET_CLOSE
-            ic_module.MARKET_CLOSE = early_time
-            exit_early = _nearest_bar(candles, "09:15", "last")
-            ic_module.MARKET_CLOSE = orig_close
+            orig_close = oc.MARKET_CLOSE
+            oc.MARKET_CLOSE = early_time
+            exit_early = oc.nearest_bar(candles, "last")
+            oc.MARKET_CLOSE = orig_close
             if entry is None or exit_true is None or exit_early is None:
                 incomplete = True
                 continue
