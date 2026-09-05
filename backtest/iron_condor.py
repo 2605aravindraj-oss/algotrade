@@ -105,18 +105,37 @@ def _nearest_contract(lookup: dict, strike: float, opt_type: str) -> dict | None
     return lookup[nearest]
 
 
+def _detect_strike_step(lookup: dict, atm_guess: float) -> int:
+    """Infer the strike spacing actually used near the money for this chain
+    (equity option strike steps vary a lot by stock price -- unlike NIFTY's
+    flat 50, RELIANCE steps by 20, a Rs 300 stock might step by 5, etc.)."""
+    strikes = sorted(set(k[0] for k in lookup))
+    if len(strikes) < 2:
+        return 50
+    nearby = sorted(strikes, key=lambda s: abs(s - atm_guess))[:6]
+    diffs = sorted(b - a for a, b in zip(sorted(nearby)[:-1], sorted(nearby)[1:]) if b > a)
+    return int(diffs[0]) if diffs else 50
+
+
 def run(
     from_date: str,
     to_date: str,
     short_distance: int = 150,
     wing_width: int = 100,
     strike_step: int = 50,
+    short_distance_strikes: int | None = None,
+    wing_width_strikes: int | None = None,
     entry_time: str = "09:15",
+    underlying_key: str = UNDERLYING_KEY,
     access_token: str | None = None,
 ) -> list[DayResult]:
-    trading_days = upstox_client.get_daily_history(UNDERLYING_KEY, from_date, to_date)
+    """short_distance/wing_width are in points. If short_distance_strikes /
+    wing_width_strikes are given instead, the actual point distance is
+    computed per-expiry from that chain's own detected strike spacing
+    (needed for equities, whose strike steps vary widely by price)."""
+    trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     expiries = sorted(
-        upstox_client.get_expired_expiries(UNDERLYING_KEY, "options", access_token)
+        upstox_client.get_expired_expiries(underlying_key, "options", access_token)
     )
 
     chain_cache: dict[str, dict] = {}
@@ -130,26 +149,38 @@ def run(
             continue
 
         spot_candles = upstox_client.get_historical_candles(
-            UNDERLYING_KEY, interval="1minute", to_date=d, from_date=d
+            underlying_key, interval="1minute", to_date=d, from_date=d
         )["data"]["candles"]
         entry_bar = _nearest_bar(spot_candles, entry_time, "first")
         if entry_bar is None:
             results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note="no spot data"))
             continue
         spot_915 = entry_bar[1]
-        atm = _round_to_step(spot_915, strike_step)
 
         if expiry not in chain_cache:
             chain_cache[expiry] = _build_chain_lookup(
-                upstox_client.get_expired_option_chain(UNDERLYING_KEY, expiry, access_token)
+                upstox_client.get_expired_option_chain(underlying_key, expiry, access_token)
             )
         lookup = chain_cache[expiry]
+        if not lookup:
+            results.append(DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=0, note="empty chain"))
+            continue
+
+        if short_distance_strikes is not None:
+            step = _detect_strike_step(lookup, spot_915)
+            atm = _round_to_step(spot_915, step)
+            eff_short_distance = short_distance_strikes * step
+            eff_wing_width = wing_width_strikes * step
+        else:
+            atm = _round_to_step(spot_915, strike_step)
+            eff_short_distance = short_distance
+            eff_wing_width = wing_width
 
         wanted = [
-            ("short_call", atm + short_distance, "CE"),
-            ("short_put", atm - short_distance, "PE"),
-            ("long_call", atm + short_distance + wing_width, "CE"),
-            ("long_put", atm - short_distance - wing_width, "PE"),
+            ("short_call", atm + eff_short_distance, "CE"),
+            ("short_put", atm - eff_short_distance, "PE"),
+            ("long_call", atm + eff_short_distance + eff_wing_width, "CE"),
+            ("long_put", atm - eff_short_distance - eff_wing_width, "PE"),
         ]
 
         legs: list[Leg] = []
