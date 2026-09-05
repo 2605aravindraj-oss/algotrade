@@ -15,14 +15,12 @@ expiry involved is, by the time this runs, in the past.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
-from data_sources import upstox_client
+from data_sources import upstox_client, cache
 from backtest import costs
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
-LEG_SLEEP_SECONDS = 0.2
 
 # entry side, exit side for each leg role
 _LEG_SIDES = {
@@ -142,7 +140,7 @@ def run(
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     expiries = sorted(
-        upstox_client.get_expired_expiries(underlying_key, "options", access_token)
+        cache.get_expired_expiries_cached(underlying_key, "options", access_token)
     )
 
     chain_cache: dict[str, dict] = {}
@@ -161,9 +159,9 @@ def run(
                 results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note=f"dte={dte} > max_dte"))
                 continue
 
-        spot_candles = upstox_client.get_historical_candles(
-            underlying_key, interval="1minute", to_date=d, from_date=d
-        )["data"]["candles"]
+        spot_candles = cache.get_day_candles_cached(
+            underlying_key, "1minute", d, expired=False
+        )
         entry_bar = _nearest_bar(spot_candles, entry_time, "first")
         if entry_bar is None:
             results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note="no spot data"))
@@ -172,7 +170,7 @@ def run(
 
         if expiry not in chain_cache:
             chain_cache[expiry] = _build_chain_lookup(
-                upstox_client.get_expired_option_chain(underlying_key, expiry, access_token)
+                cache.get_expired_option_chain_cached(underlying_key, expiry, access_token)
             )
         lookup = chain_cache[expiry]
         if not lookup:
@@ -219,10 +217,9 @@ def run(
         day_result = DayResult(date=d, expiry=expiry, spot_915=spot_915, atm=atm, legs=legs)
         incomplete = False
         for leg in legs:
-            candles = upstox_client.get_expired_candles(
-                leg.instrument_key, "1minute", d, d, access_token
+            candles = cache.get_day_candles_cached(
+                leg.instrument_key, "1minute", d, expired=True, access_token=access_token
             )
-            time.sleep(LEG_SLEEP_SECONDS)
             entry = _nearest_bar(candles, entry_time, "first")
             exit_ = _nearest_bar(candles, entry_time, "last")
             if entry is None or exit_ is None:
