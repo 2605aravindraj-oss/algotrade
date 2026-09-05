@@ -77,3 +77,37 @@ table:
 python scan_structure_reversal.py TCS INFY HDFCBANK RELIANCE
 python scan_structure_reversal.py   # defaults to a 20-stock large-cap basket
 ```
+
+## Expired options data
+
+`data_sources/upstox_client.py` also wraps Upstox's **expired-instruments**
+API (`get_expired_expiries`, `get_expired_option_chain`, `get_expired_candles`),
+which requires an OAuth access token but gives full historical OHLC/OI for
+any past NSE options expiry and strike, at up to 1-minute resolution — not
+just daily bars for currently-listed contracts.
+
+## Daily intraday iron condor backtest (NIFTY 50)
+
+`backtest/iron_condor.py` backtests entering a 4-leg iron condor on NIFTY
+50 weekly options every trading day at ~09:15 and squaring off all legs at
+market close:
+
+```
+short call = ATM + short_distance   (sell)
+short put  = ATM - short_distance   (sell)
+long call  = short call + wing_width  (buy, protection)
+long put   = short put  - wing_width  (buy, protection)
+```
+
+Each day uses whichever weekly expiry is nearest (from same-day/0DTE up to
+the following week), with strikes chosen off that day's 09:15 spot price.
+Requires `UPSTOX_ACCESS_TOKEN` since every expiry involved is in the past.
+
+```
+export UPSTOX_ACCESS_TOKEN=...
+python run_iron_condor_backtest.py --from 2025-07-01 --to 2025-08-29 \
+    --short-distance 150 --wing-width 100
+```
+
+Prints net P&L, win rate, average win/loss, best/worst day, max drawdown,
+and the full daily trade log.

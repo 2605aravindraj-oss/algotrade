@@ -79,3 +79,57 @@ def get_quotes(instrument_keys: list[str], access_token: str | None = None) -> d
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def _auth_headers(access_token: str | None) -> dict:
+    token = access_token or os.environ.get("UPSTOX_ACCESS_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "This endpoint requires an access token. Set UPSTOX_ACCESS_TOKEN "
+            "or pass access_token explicitly."
+        )
+    return {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+
+def get_expired_expiries(
+    underlying_key: str, expiry_type: str = "options", access_token: str | None = None
+) -> list[str]:
+    """List past expiry dates for an underlying's options/futures. Requires auth."""
+    resp = requests.get(
+        f"{BASE_URL}/expired-instruments/expiries",
+        params={"instrument_key": underlying_key, "expiry_type": expiry_type},
+        headers=_auth_headers(access_token),
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
+def get_expired_option_chain(
+    underlying_key: str, expiry_date: str | date, access_token: str | None = None
+) -> list[dict]:
+    """List expired option contracts (all strikes/CE+PE) for one expiry. Requires auth."""
+    resp = requests.get(
+        f"{BASE_URL}/expired-instruments/option/contract",
+        params={"instrument_key": underlying_key, "expiry_date": str(expiry_date)},
+        headers=_auth_headers(access_token),
+        timeout=TIMEOUT,
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
+def get_expired_candles(
+    expired_instrument_key: str,
+    interval: str,
+    to_date: str | date,
+    from_date: str | date,
+    access_token: str | None = None,
+) -> list[list]:
+    """Fetch candles for an expired instrument key (e.g. "NSE_FO|132352|28-08-2025").
+    Requires auth. Returns raw candle rows, newest first.
+    """
+    path = f"{BASE_URL}/expired-instruments/historical-candle/{quote(expired_instrument_key, safe='')}/{interval}/{to_date}/{from_date}"
+    resp = requests.get(path, headers=_auth_headers(access_token), timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()["data"]["candles"]
