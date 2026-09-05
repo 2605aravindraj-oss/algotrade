@@ -114,7 +114,7 @@ def _detect_strike_step(lookup: dict, atm_guess: float) -> int:
         return 50
     nearby = sorted(strikes, key=lambda s: abs(s - atm_guess))[:6]
     diffs = sorted(b - a for a, b in zip(sorted(nearby)[:-1], sorted(nearby)[1:]) if b > a)
-    return int(diffs[0]) if diffs else 50
+    return max(1, int(diffs[0])) if diffs else 50
 
 
 def run(

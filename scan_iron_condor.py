@@ -60,7 +60,8 @@ def main() -> None:
             all_results[symbol] = results
             ok = [r for r in results if r.ok]
             if not ok:
-                print(f"{symbol:<12}  no complete trading days")
+                notes = {r.note for r in results if not r.ok}
+                print(f"{symbol:<12}  no complete trading days ({', '.join(notes) or 'unknown'})")
                 continue
             gross = sum(r.pnl_rupees_gross for r in ok)
             costs_total = sum(r.costs_rupees for r in ok)
