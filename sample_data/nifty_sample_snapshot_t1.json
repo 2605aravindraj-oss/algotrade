@@ -1,0 +1,470 @@
+[
+  {
+    "strike_price": 24200,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24200",
+      "market_data": {
+        "ltp": 782.02,
+        "oi": 86294,
+        "volume": 6987,
+        "close_price": 779.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24200",
+      "market_data": {
+        "ltp": 161.86,
+        "oi": 3518535,
+        "volume": 279805,
+        "close_price": 164.62
+      },
+      "option_greeks": {
+        "iv": 14.65,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24300,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24300",
+      "market_data": {
+        "ltp": 668.52,
+        "oi": 156225,
+        "volume": 12453,
+        "close_price": 688.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24300",
+      "market_data": {
+        "ltp": 176.81,
+        "oi": 3480598,
+        "volume": 275043,
+        "close_price": 173.62
+      },
+      "option_greeks": {
+        "iv": 14.3,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24400,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24400",
+      "market_data": {
+        "ltp": 585.56,
+        "oi": 267870,
+        "volume": 21261,
+        "close_price": 597.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24400",
+      "market_data": {
+        "ltp": 187.63,
+        "oi": 3193090,
+        "volume": 257090,
+        "close_price": 182.62
+      },
+      "option_greeks": {
+        "iv": 13.95,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24500,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24500",
+      "market_data": {
+        "ltp": 494.65,
+        "oi": 427901,
+        "volume": 34457,
+        "close_price": 506.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24500",
+      "market_data": {
+        "ltp": 195.62,
+        "oi": 2811106,
+        "volume": 228612,
+        "close_price": 191.62
+      },
+      "option_greeks": {
+        "iv": 13.6,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24600,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24600",
+      "market_data": {
+        "ltp": 421.65,
+        "oi": 667311,
+        "volume": 53164,
+        "close_price": 415.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24600",
+      "market_data": {
+        "ltp": 201.06,
+        "oi": 2446905,
+        "volume": 193376,
+        "close_price": 200.62
+      },
+      "option_greeks": {
+        "iv": 13.25,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24700,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24700",
+      "market_data": {
+        "ltp": 353.91,
+        "oi": 1032614,
+        "volume": 77933,
+        "close_price": 324.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24700",
+      "market_data": {
+        "ltp": 186.66,
+        "oi": 2120683,
+        "volume": 155646,
+        "close_price": 209.62
+      },
+      "option_greeks": {
+        "iv": 12.9,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24800,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24800",
+      "market_data": {
+        "ltp": 255.63,
+        "oi": 1440299,
+        "volume": 108701,
+        "close_price": 233.92
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24800",
+      "market_data": {
+        "ltp": 194.76,
+        "oi": 1623029,
+        "volume": 119121,
+        "close_price": 218.62
+      },
+      "option_greeks": {
+        "iv": 12.55,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 24900,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE24900",
+      "market_data": {
+        "ltp": 232.37,
+        "oi": 1909742,
+        "volume": 144131,
+        "close_price": 212.38
+      },
+      "option_greeks": {
+        "iv": 12.63,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE24900",
+      "market_data": {
+        "ltp": 265.37,
+        "oi": 1181756,
+        "volume": 86734,
+        "close_price": 297.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 25000,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE25000",
+      "market_data": {
+        "ltp": 222.65,
+        "oi": 2410458,
+        "volume": 181921,
+        "close_price": 203.38
+      },
+      "option_greeks": {
+        "iv": 12.78,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE25000",
+      "market_data": {
+        "ltp": 347.27,
+        "oi": 817857,
+        "volume": 60026,
+        "close_price": 388.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 25100,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE25100",
+      "market_data": {
+        "ltp": 194.99,
+        "oi": 2780979,
+        "volume": 218346,
+        "close_price": 194.38
+      },
+      "option_greeks": {
+        "iv": 12.93,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE25100",
+      "market_data": {
+        "ltp": 488.55,
+        "oi": 491810,
+        "volume": 39536,
+        "close_price": 479.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 25200,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE25200",
+      "market_data": {
+        "ltp": 186.24,
+        "oi": 3131519,
+        "volume": 249339,
+        "close_price": 185.38
+      },
+      "option_greeks": {
+        "iv": 13.08,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE25200",
+      "market_data": {
+        "ltp": 577.08,
+        "oi": 314175,
+        "volume": 24775,
+        "close_price": 570.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 25300,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE25300",
+      "market_data": {
+        "ltp": 174.15,
+        "oi": 3324098,
+        "volume": 270848,
+        "close_price": 176.38
+      },
+      "option_greeks": {
+        "iv": 13.23,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE25300",
+      "market_data": {
+        "ltp": 644.41,
+        "oi": 182868,
+        "volume": 14790,
+        "close_price": 661.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  },
+  {
+    "strike_price": 25400,
+    "underlying_spot_price": 24851.7,
+    "call_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929CE25400",
+      "market_data": {
+        "ltp": 165.15,
+        "oi": 3460096,
+        "volume": 279798,
+        "close_price": 167.38
+      },
+      "option_greeks": {
+        "iv": 13.38,
+        "delta": 0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    },
+    "put_options": {
+      "instrument_key": "NSE_FO|NIFTY20260929PE25400",
+      "market_data": {
+        "ltp": 758.2,
+        "oi": 103166,
+        "volume": 8387,
+        "close_price": 752.08
+      },
+      "option_greeks": {
+        "iv": 12.5,
+        "delta": -0.5,
+        "gamma": 0.001,
+        "theta": -5.0,
+        "vega": 10.0
+      }
+    }
+  }
+]
