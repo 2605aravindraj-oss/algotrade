@@ -1,0 +1,19 @@
+[
+  {
+    "symbol": "RELIANCE",
+    "to_date": "2026-08-25",
+    "strike_step": 10,
+    "trades": 1297,
+    "trading_days": 40,
+    "winning_days": 40,
+    "winning_days_pct": 100.0,
+    "gross_win_rate_pct": 71.6,
+    "net_win_rate_pct": 63.5,
+    "gross_pnl": 359580.0,
+    "total_costs": 85738.12,
+    "net_pnl": 273841.88,
+    "avg_win": 441.67,
+    "avg_loss": -190.47,
+    "max_drawdown": -4071.7
+  }
+]
