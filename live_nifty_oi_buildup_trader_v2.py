@@ -164,14 +164,22 @@ def _record_trade(state: dict, direction: str, strike: float, opt_type: str,
 
 
 def _entry_allowed(direction: str, fut_price: float, snap: dict, prev_pcr: float | None) -> str | None:
-    """Returns None if allowed, else a short reason string for why it's blocked."""
+    """Returns None if allowed, else a short reason string for why it's blocked.
+
+    A wall only matters if it's actually in front of price in the trade's
+    direction: resistance must be ABOVE price to block a long, support must
+    be BELOW price to block a short. A wall behind price (already crossed)
+    is not an obstacle, regardless of how close the raw point gap looks.
+    """
     if direction == "LONG":
-        if snap["resistance"] is not None and (snap["resistance"] - fut_price) < WALL_BUFFER:
-            return f"resistance wall too close ({snap['resistance']}, {snap['resistance']-fut_price:.0f}pt away)"
+        r = snap["resistance"]
+        if r is not None and r > fut_price and (r - fut_price) < WALL_BUFFER:
+            return f"resistance wall too close ({r}, {r - fut_price:.0f}pt away)"
         if prev_pcr and snap["pcr"] and snap["pcr"] < prev_pcr * (1 - PCR_MOVE_LIMIT):
             return f"PCR falling sharply ({prev_pcr:.2f} -> {snap['pcr']:.2f}, calls being written)"
     else:
-        if snap["support"] is not None and (fut_price - snap["support"]) < WALL_BUFFER:
+        s = snap["support"]
+        if s is not None and s < fut_price and (fut_price - s) < WALL_BUFFER:
             return f"support wall too close ({snap['support']}, {fut_price-snap['support']:.0f}pt away)"
         if prev_pcr and snap["pcr"] and snap["pcr"] > prev_pcr * (1 + PCR_MOVE_LIMIT):
             return f"PCR rising sharply ({prev_pcr:.2f} -> {snap['pcr']:.2f}, puts being written)"
