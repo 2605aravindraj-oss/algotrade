@@ -270,5 +270,22 @@
     "avg_win": 600.38,
     "avg_loss": -310.85,
     "max_drawdown": -10474.62
+  },
+  {
+    "symbol": "TITAN",
+    "to_date": "2026-08-25",
+    "strike_step": 50,
+    "trades": 642,
+    "trading_days": 40,
+    "winning_days": 26,
+    "winning_days_pct": 65.0,
+    "gross_win_rate_pct": 56.2,
+    "net_win_rate_pct": 51.7,
+    "gross_pnl": 175985.25,
+    "total_costs": 44428.21,
+    "net_pnl": 131557.04,
+    "avg_win": 752.92,
+    "avg_loss": -381.97,
+    "max_drawdown": -12604.95
   }
 ]
