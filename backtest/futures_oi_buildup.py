@@ -59,13 +59,25 @@ def run(
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
     access_token: str | None = None,
+    futures_expired: bool = False,
 ) -> list[OptionTrade]:
-    fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
+    """futures_expired=True fetches the futures leg through the
+    expired-instruments API instead of the public currently-listed-only
+    endpoint -- pass a `futures_key` like "NSE_FO|62329|30-06-2026"
+    (from upstox_client.get_expired_expiries(..., "futures") +
+    a /expired-instruments/future/contract lookup) to backtest a window
+    that predates the currently-listed futures contract's own listing.
+    """
+    if futures_expired:
+        raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
+        fut_days = [{"date": d} for d in sorted({c[0][:10] for c in raw_days})]
+    else:
+        fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
 
     all_5min: list[list] = []
     for day in fut_days:
         rows_1min = sorted(
-            cache.get_day_candles_cached(futures_key, "1minute", day["date"], expired=False),
+            cache.get_day_candles_cached(futures_key, "1minute", day["date"], expired=futures_expired, access_token=access_token),
             key=lambda c: c[0],
         )
         all_5min.extend(_resample_5min(rows_1min))
