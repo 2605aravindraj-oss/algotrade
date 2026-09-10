@@ -53,6 +53,19 @@ def get_historical_candles(
     return resp.json()
 
 
+def get_intraday_candles(instrument_key: str, interval: str = "1minute") -> list[list]:
+    """Fetch the *current* trading day's candles so far, up to the last
+    completed candle. No auth required. Unlike get_historical_candles, this
+    covers today -- the regular historical-candle endpoint only publishes a
+    day's data the following day. Returns raw rows newest-first:
+    [timestamp, open, high, low, close, volume, oi].
+    """
+    path = f"{BASE_URL}/historical-candle/intraday/{quote(instrument_key, safe='')}/{interval}"
+    resp = _get_with_retry(path)
+    resp.raise_for_status()
+    return resp.json()["data"]["candles"]
+
+
 def get_daily_history(
     instrument_key: str,
     from_date: str | date,
