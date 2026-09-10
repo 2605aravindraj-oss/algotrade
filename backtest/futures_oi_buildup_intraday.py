@@ -39,14 +39,14 @@ def _load_master() -> list[dict]:
         return json.load(f)
 
 
-def _nearest_future(master: list[dict], underlying_symbol: str) -> dict:
-    futs = [d for d in master if d.get("segment") == "NSE_FO" and d.get("underlying_symbol") == underlying_symbol
+def _nearest_future(master: list[dict], underlying_symbol: str, segment: str = "NSE_FO") -> dict:
+    futs = [d for d in master if d.get("segment") == segment and d.get("underlying_symbol") == underlying_symbol
             and d.get("instrument_type") == "FUT"]
     return min(futs, key=lambda d: d["expiry"])
 
 
-def _option_chain(master: list[dict], underlying_symbol: str) -> tuple[str, dict]:
-    opts = [d for d in master if d.get("segment") == "NSE_FO" and d.get("underlying_symbol") == underlying_symbol
+def _option_chain(master: list[dict], underlying_symbol: str, segment: str = "NSE_FO") -> tuple[str, dict]:
+    opts = [d for d in master if d.get("segment") == segment and d.get("underlying_symbol") == underlying_symbol
             and d.get("instrument_type") in ("CE", "PE")]
     nearest_expiry_ms = min(d["expiry"] for d in opts)
     chain = [d for d in opts if d["expiry"] == nearest_expiry_ms]
@@ -57,11 +57,12 @@ def _option_chain(master: list[dict], underlying_symbol: str) -> tuple[str, dict
 def run_today(
     underlying_symbol: str = "NIFTY",
     strike_step: int = 50,
+    segment: str = "NSE_FO",
 ) -> list[OptionTrade]:
     today = date.today().isoformat()
     master = _load_master()
-    fut = _nearest_future(master, underlying_symbol)
-    expiry, chain_lookup = _option_chain(master, underlying_symbol)
+    fut = _nearest_future(master, underlying_symbol, segment)
+    expiry, chain_lookup = _option_chain(master, underlying_symbol, segment)
 
     fut_candles = get_intraday_candles(fut["instrument_key"], "1minute")
     rows_1min = sorted(fut_candles, key=lambda c: c[0])
