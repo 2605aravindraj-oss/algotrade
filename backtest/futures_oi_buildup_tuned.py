@@ -75,6 +75,46 @@ def _bar_at_or_after(rows, time_str):
     return None
 
 
+def _compute_vwap_ema(all_bars: list[list], ema_period: int = 20) -> tuple[list[float | None], list[float | None]]:
+    """VWAP (session-cumulative, resets each new day) and EMA (continuous
+    across the whole series, seeded by an SMA of the first `ema_period`
+    closes) -- both aligned index-for-index with all_bars."""
+    vwaps: list[float | None] = []
+    emas: list[float | None] = []
+
+    cum_pv = 0.0
+    cum_vol = 0.0
+    last_day = None
+    closes_seen: list[float] = []
+    ema_prev: float | None = None
+    k = 2 / (ema_period + 1)
+
+    for row in all_bars:
+        ts, o, h, l, c, v, oi = row
+        d = ts[:10]
+        if d != last_day:
+            cum_pv = 0.0
+            cum_vol = 0.0
+            last_day = d
+        typical = (h + l + c) / 3
+        cum_pv += typical * v
+        cum_vol += v
+        vwaps.append(cum_pv / cum_vol if cum_vol else c)
+
+        closes_seen.append(c)
+        if ema_prev is None:
+            if len(closes_seen) >= ema_period:
+                ema_prev = sum(closes_seen[-ema_period:]) / ema_period
+                emas.append(ema_prev)
+            else:
+                emas.append(None)
+        else:
+            ema_prev = c * k + ema_prev * (1 - k)
+            emas.append(ema_prev)
+
+    return vwaps, emas
+
+
 def run(
     from_date: str,
     to_date: str,
@@ -89,7 +129,14 @@ def run(
     min_price_move: float = 0.0,
     min_oi_move: float = 0.0,
     stop_loss_points: float | None = None,
+    trend_filter: bool = False,
+    ema_period: int = 20,
 ) -> list[OptionTrade]:
+    """trend_filter=True: only enter Long Buildup signals when price is
+    above both session VWAP and the EMA(ema_period); only enter Short
+    Buildup signals when price is below both. Applies to every new leg
+    opened (fresh entries and the re-entry half of a reverse) -- exits
+    are unaffected."""
     if futures_expired:
         raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
         fut_days = [{"date": d} for d in sorted({c[0][:10] for c in raw_days})]
@@ -106,6 +153,8 @@ def run(
     all_bars.sort(key=lambda c: c[0])
     if len(all_bars) < 2:
         return []
+
+    vwaps, emas = _compute_vwap_ema(all_bars, ema_period)
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
@@ -149,11 +198,20 @@ def run(
 
         atm = oc.round_to_step(c, strike_step)
         expiry = next((e for e in expiries if e >= d), None)
+        vwap_now = vwaps[i]
+        ema_now = emas[i]
 
         def _enter(direction: str) -> None:
             nonlocal position
             if expiry is None:
                 return
+            if trend_filter:
+                if ema_now is None:
+                    return
+                if direction == "LONG" and not (c > vwap_now and c > ema_now):
+                    return
+                if direction == "SHORT" and not (c < vwap_now and c < ema_now):
+                    return
             opt_type = "CE" if direction == "LONG" else "PE"
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
             if contract is None or not candles:
