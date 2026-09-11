@@ -12,12 +12,12 @@ def round_to_step(value: float, step: int) -> int:
     return int(round(value / step) * step)
 
 
-def nearest_bar(candles: list[list], pick: str) -> tuple[str, float] | None:
+def nearest_bar(candles: list[list], pick: str, entry_time: str = "09:15") -> tuple[str, float] | None:
     """candles: newest-first rows [timestamp, o, h, l, c, vol, oi].
-    pick="first": earliest bar at/after 09:15. pick="last": latest bar at/before
-    market close (15:30) -- the raw feed can include post-close settlement
-    ticks past 15:30 pinned at the min tick, so we must not just take the
-    literal last bar in the response.
+    pick="first": earliest bar at/after `entry_time`. pick="last": latest bar
+    at/before market close (15:30) -- the raw feed can include post-close
+    settlement ticks past 15:30 pinned at the min tick, so we must not just
+    take the literal last bar in the response.
     """
     if not candles:
         return None
@@ -29,7 +29,7 @@ def nearest_bar(candles: list[list], pick: str) -> tuple[str, float] | None:
         row = at_or_before_close[-1]
         return row[0], row[4]
     for row in rows:
-        if row[0][11:16] >= "09:15":
+        if row[0][11:16] >= entry_time:
             return row[0], row[1]
     return rows[0][0], rows[0][1]
 

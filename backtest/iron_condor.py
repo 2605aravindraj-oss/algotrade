@@ -107,7 +107,7 @@ def run(
         spot_candles = cache.get_day_candles_cached(
             underlying_key, "1minute", d, expired=False
         )
-        entry_bar = oc.nearest_bar(spot_candles, "first")
+        entry_bar = oc.nearest_bar(spot_candles, "first", entry_time)
         if entry_bar is None:
             results.append(DayResult(date=d, expiry=expiry, spot_915=0, atm=0, note="no spot data"))
             continue
@@ -165,7 +165,7 @@ def run(
             candles = cache.get_day_candles_cached(
                 leg.instrument_key, "1minute", d, expired=True, access_token=access_token
             )
-            entry = oc.nearest_bar(candles, "first")
+            entry = oc.nearest_bar(candles, "first", entry_time)
             exit_ = oc.nearest_bar(candles, "last")
             if entry is None or exit_ is None:
                 incomplete = True
