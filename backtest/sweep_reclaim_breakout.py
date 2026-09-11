@@ -50,7 +50,13 @@ def run(
     to_date: str,
     underlying_key: str = UNDERLYING_KEY,
     lot_size: int = 65,
+    target_points: float = 15.0,
 ) -> list[Trade]:
+    """Scalp exit: take profit at entry + target_points, stop out if price
+    breaks back below the pattern candle's own low (the reclaim failing),
+    else forced flat at FORCE_FLAT_TIME. Checked bar-by-bar on 1-minute
+    candles after entry; if a bar's range spans both levels, the stop is
+    assumed to trigger first (conservative)."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trades: list[Trade] = []
 
@@ -82,39 +88,58 @@ def run(
             continue
 
         high3 = pattern_bar[2]
+        low3 = pattern_bar[3]
         pattern_end_time = pattern_bar[0][11:16]
 
-        breakout_bar = None
-        for row in rows_1min:
+        breakout_idx = None
+        for idx, row in enumerate(rows_1min):
             ts, o, h, l, c, v, oi = row
             if ts[11:16] <= pattern_end_time:
                 continue
             if h > high3:
-                breakout_bar = row
+                breakout_idx = idx
                 break
-        if breakout_bar is None:
+        if breakout_idx is None:
             continue
 
+        breakout_bar = rows_1min[breakout_idx]
         entry_time = breakout_bar[0]
         entry_price = high3  # fill at the breakout level (stop-order style)
+        stop_level = low3  # invalidation: the reclaim candle's own low
+        target_level = entry_price + target_points
 
-        # forced flat at FORCE_FLAT_TIME, else last bar of the day
         exit_row = None
-        for row in rows_1min:
-            ts = row[0]
+        exit_price = None
+        exit_reason = "eod"
+        for row in rows_1min[breakout_idx + 1:]:
+            ts, o, h, l, c, v, oi = row
             if ts[11:16] >= FORCE_FLAT_TIME:
                 exit_row = row
+                exit_price = c
+                exit_reason = "eod"
+                break
+            if l <= stop_level:
+                exit_row = row
+                exit_price = stop_level
+                exit_reason = "stop_loss"
+                break
+            if h >= target_level:
+                exit_row = row
+                exit_price = target_level
+                exit_reason = "target"
                 break
         if exit_row is None:
             exit_row = rows_1min[-1]
+            exit_price = exit_row[4]
+            exit_reason = "eod_data_end"
 
         trade = Trade(
             date=d, direction="LONG", entry_time=entry_time, entry_price=entry_price,
             lot_size=lot_size,
         )
         trade.exit_time = exit_row[0]
-        trade.exit_price = exit_row[4]
-        trade.exit_reason = "eod"
+        trade.exit_price = exit_price
+        trade.exit_reason = exit_reason
         trades.append(trade)
 
     return trades
