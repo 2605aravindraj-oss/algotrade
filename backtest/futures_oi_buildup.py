@@ -111,6 +111,14 @@ def run(
         ts, o, h, l, c, v, oi = row
         d = ts[:10]
         time_str = ts[11:16]
+        # Each 5-min bucket is labeled by its *start* (e.g. "10:30" for the
+        # 10:30-10:34 window), but the buildup signal it produces is only
+        # knowable once that window's last 1-min candle closes -- +5 min.
+        # Option fills must be priced from that point, not the bucket's
+        # start label, or every fill uses a price from before the signal
+        # that triggered it even existed.
+        _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + 5, 60)
+        decision_time_str = f"{_dh:02d}:{_dm:02d}"
 
         if prev_close is None:
             prev_close, prev_oi = c, oi
@@ -128,7 +136,7 @@ def run(
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
             if contract is None or not candles:
                 return
-            bar = _bar_at_or_before(candles, time_str) or _bar_at_or_after(candles, time_str)
+            bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
             if bar is None:
                 return
             position = {
@@ -144,7 +152,7 @@ def run(
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
             bar = None
             if candles:
-                bar = _bar_at_or_before(candles, time_str) or _bar_at_or_after(candles, time_str)
+                bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
             exit_price = bar[4] if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
             trades.append(OptionTrade(

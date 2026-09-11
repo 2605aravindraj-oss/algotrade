@@ -86,6 +86,11 @@ def run_today(
     for row in all_5min:
         ts, o, h, l, c, v, oi = row
         time_str = ts[11:16]
+        # See futures_oi_buildup.run: buckets are labeled by their start,
+        # but the signal is only knowable once the bucket's last 1-min
+        # candle closes -- price fills from +5 min, not the bucket start.
+        _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + 5, 60)
+        decision_time_str = f"{_dh:02d}:{_dm:02d}"
 
         if prev_close is None:
             prev_close, prev_oi = c, oi
@@ -101,7 +106,8 @@ def run_today(
             if contract is None:
                 return
             candles = _option_candles(contract)
-            bar = next((r for r in reversed(candles) if r[0][11:16] <= time_str), None) or (candles[0] if candles else None)
+            bar = next((r for r in candles if r[0][11:16] >= decision_time_str), None) \
+                or next((r for r in reversed(candles) if r[0][11:16] <= decision_time_str), None)
             if bar is None:
                 return
             position = {
@@ -115,7 +121,8 @@ def run_today(
             if position is None:
                 return
             candles = _option_candles(position["contract"])
-            bar = next((r for r in reversed(candles) if r[0][11:16] <= time_str), None) or (candles[0] if candles else None)
+            bar = next((r for r in candles if r[0][11:16] >= decision_time_str), None) \
+                or next((r for r in reversed(candles) if r[0][11:16] <= decision_time_str), None)
             exit_price = bar[4] if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
             trades.append(OptionTrade(
