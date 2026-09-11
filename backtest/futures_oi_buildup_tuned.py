@@ -131,12 +131,24 @@ def run(
     stop_loss_points: float | None = None,
     trend_filter: bool = False,
     ema_period: int = 20,
+    order_flow_filter: bool = False,
+    flow_exit_threshold: float = 0.3,
 ) -> list[OptionTrade]:
     """trend_filter=True: only enter Long Buildup signals when price is
     above both session VWAP and the EMA(ema_period); only enter Short
     Buildup signals when price is below both. Applies to every new leg
     opened (fresh entries and the re-entry half of a reverse) -- exits
-    are unaffected."""
+    are unaffected.
+
+    order_flow_filter=True: a per-bar OHLCV proxy for order flow --
+    flow_ratio = (2*close - high - low) / (high - low), ranging -1
+    (closed at the bar's low, selling pressure) to +1 (closed at the
+    high, buying pressure). Gates entries the same way as trend_filter
+    (LONG needs flow_ratio > 0, SHORT needs < 0) AND adds a new early
+    exit: if flow reverses hard against an open position (past
+    +/-flow_exit_threshold), exit immediately as "flow_reversal",
+    ahead of the OI-based unwind/reverse rules.
+    """
     if futures_expired:
         raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
         fut_days = [{"date": d} for d in sorted({c[0][:10] for c in raw_days})]
@@ -196,6 +208,8 @@ def run(
         confirmed = len(reading_streak) == confirm_bars and len(set(reading_streak)) == 1
         confirmed_buildup = buildup if confirmed else "Neutral"
 
+        flow_ratio = (2 * c - h - l) / (h - l) if h != l else 0.0
+
         atm = oc.round_to_step(c, strike_step)
         expiry = next((e for e in expiries if e >= d), None)
         vwap_now = vwaps[i]
@@ -211,6 +225,11 @@ def run(
                 if direction == "LONG" and not (c > vwap_now and c > ema_now):
                     return
                 if direction == "SHORT" and not (c < vwap_now and c < ema_now):
+                    return
+            if order_flow_filter:
+                if direction == "LONG" and not (flow_ratio > 0):
+                    return
+                if direction == "SHORT" and not (flow_ratio < 0):
                     return
             opt_type = "CE" if direction == "LONG" else "PE"
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
@@ -241,6 +260,14 @@ def run(
                 exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason=reason,
             ))
             position = None
+
+        # Order-flow reversal exit: flow turns hard against the position,
+        # checked ahead of both the stop-loss and the OI-based exit rules.
+        if position is not None and order_flow_filter:
+            if position["direction"] == "LONG" and flow_ratio < -flow_exit_threshold:
+                _exit("flow_reversal")
+            elif position["direction"] == "SHORT" and flow_ratio > flow_exit_threshold:
+                _exit("flow_reversal")
 
         # Stop-loss check against this bar's option high/low, before signal logic
         if position is not None and stop_loss_points is not None:
