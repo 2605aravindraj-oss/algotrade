@@ -60,6 +60,8 @@ def run(
     strike_step: int = 50,
     access_token: str | None = None,
     futures_expired: bool = False,
+    max_daily_profit: float | None = None,
+    max_daily_loss: float | None = None,
 ) -> list[OptionTrade]:
     """futures_expired=True fetches the futures leg through the
     expired-instruments API instead of the public currently-listed-only
@@ -67,6 +69,12 @@ def run(
     (from upstox_client.get_expired_expiries(..., "futures") +
     a /expired-instruments/future/contract lookup) to backtest a window
     that predates the currently-listed futures contract's own listing.
+
+    max_daily_profit / max_daily_loss: once realized net P&L for the
+    current day reaches +max_daily_profit or -max_daily_loss, any open
+    position is force-closed (exit_reason="daily_limit") and no new
+    entries are taken for the rest of that day. Both are in rupees and
+    both None by default (no cap). Resets at the start of each new day.
     """
     if futures_expired:
         raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
@@ -106,11 +114,19 @@ def run(
     position = None  # dict: direction, entry_time, entry_price(premium), strike, expiry, lot_size
     prev_close = None
     prev_oi = None
+    current_day = None
+    daily_pnl = 0.0
+    day_halted = False
 
     for i, row in enumerate(all_5min):
         ts, o, h, l, c, v, oi = row
         d = ts[:10]
         time_str = ts[11:16]
+
+        if d != current_day:
+            current_day = d
+            daily_pnl = 0.0
+            day_halted = False
         # Each 5-min bucket is labeled by its *start* (e.g. "10:30" for the
         # 10:30-10:34 window), but the buildup signal it produces is only
         # knowable once that window's last 1-min candle closes -- +5 min.
@@ -130,7 +146,7 @@ def run(
 
         def _enter(direction: str) -> None:
             nonlocal position
-            if expiry is None:
+            if expiry is None or day_halted:
                 return
             opt_type = "CE" if direction == "LONG" else "PE"
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
@@ -146,7 +162,7 @@ def run(
             }
 
         def _exit(reason: str) -> None:
-            nonlocal position
+            nonlocal position, daily_pnl, day_halted
             if position is None:
                 return
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
@@ -155,12 +171,18 @@ def run(
                 bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
             exit_price = bar[4] if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
-            trades.append(OptionTrade(
+            trade = OptionTrade(
                 date=position["date"], direction=position["direction"], expiry=position["expiry"],
                 strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
                 exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason=reason,
-            ))
+            )
+            trades.append(trade)
             position = None
+            daily_pnl += trade.pnl_rupees
+            if (max_daily_profit is not None and daily_pnl >= max_daily_profit) or (
+                max_daily_loss is not None and daily_pnl <= -max_daily_loss
+            ):
+                day_halted = True
 
         if position is None:
             if buildup == "Long Buildup":
