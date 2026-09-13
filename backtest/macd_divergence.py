@@ -49,14 +49,20 @@ def run(
     lot_size: int = 65,
     fractal: int = 2,
     target_r_multiple: float = 2.0,
+    futures_expired: bool = False,
+    access_token: str | None = None,
 ) -> list[Trade]:
-    fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
+    if futures_expired:
+        raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
+        fut_days = [{"date": d} for d in sorted({c[0][:10] for c in raw_days})]
+    else:
+        fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
     trades: list[Trade] = []
 
     for day in fut_days:
         d = day["date"]
         rows_1min = sorted(
-            cache.get_day_candles_cached(futures_key, "1minute", d, expired=False),
+            cache.get_day_candles_cached(futures_key, "1minute", d, expired=futures_expired, access_token=access_token),
             key=lambda c: c[0],
         )
         if not rows_1min:
