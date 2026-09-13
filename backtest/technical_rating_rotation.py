@@ -139,8 +139,14 @@ def run(
     rebalance_days: int = 30,
     starting_capital: float = 1_000_000.0,
     min_label: str = "Strong Buy",
+    top_n: int | None = None,
     symbols: list[str] | None = None,
 ) -> RotationResult:
+    """Selection mode: if top_n is set, every rebalance ranks all stocks by
+    overall_rating and picks the top `top_n` regardless of label (always
+    fully invested, never sits in cash). Otherwise (top_n=None), picks
+    whichever stocks match `min_label` exactly, and sits in cash on a
+    period where nothing qualifies."""
     symbols = symbols or NIFTY_50
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=320)).isoformat()
 
@@ -166,6 +172,18 @@ def run(
         return histories[sym][idx]["close"]
 
     def _screen(as_of_date: str) -> list[str]:
+        if top_n is not None:
+            rated = []
+            for sym, candles in histories.items():
+                idx = date_index[sym].get(as_of_date)
+                if idx is None:
+                    continue
+                r = rate(sym, candles[:idx + 1])
+                if r is not None:
+                    rated.append(r)
+            rated.sort(key=lambda r: r.overall_rating, reverse=True)
+            return [r.symbol for r in rated[:top_n]]
+
         picks = []
         for sym, candles in histories.items():
             idx = date_index[sym].get(as_of_date)
