@@ -23,9 +23,12 @@ Per day, continuously (can fire more than once, one position at a time):
    Exit the instant a subsequent 1-min bar touches the current stop
    level. While in a trade, new breakout patterns are still tracked
    (so the next setup is ready the moment this trade closes) but no
-   new entry is taken until flat.
+   new entry is taken until flat. Pass trail_points=None to disable
+   this entirely and just hold to end of day instead (see 5).
 5. Forced flat at FORCE_FLAT_TIME (no overnight position); any pending
    pattern lapses at day end and a fresh one must form the next day.
+   With trail_points=None this is the ONLY exit -- one trade per
+   pattern, held all the way to the close.
 
 Reuses rsi2_reversion.Trade and its futures-style cost model.
 """
@@ -56,9 +59,13 @@ def run(
     underlying_key: str = UNDERLYING_KEY,
     bb_period: int = 20,
     bb_std: float = 2.0,
-    trail_points: float = 20.0,
+    trail_points: float | None = 20.0,
     lot_size: int = 65,
 ) -> list[Trade]:
+    """trail_points=None disables the trailing stop entirely -- once
+    entered, the position just holds until forced flat at
+    FORCE_FLAT_TIME (or the pattern-search behavior described above for
+    when a new entry is taken)."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trades: list[Trade] = []
 
@@ -115,24 +122,25 @@ def run(
                     position = None
                     pattern = None
                     continue
-                if position.direction == "LONG":
-                    extreme = max(extreme, h)
-                    new_stop = extreme - trail_points
-                    stop_level = max(stop_level, new_stop)
-                    if l <= stop_level:
-                        position.exit_time, position.exit_price, position.exit_reason = ts, stop_level, "trailing_stop"
-                        trades.append(position)
-                        position = None
-                        pattern = None
-                else:
-                    extreme = min(extreme, l)
-                    new_stop = extreme + trail_points
-                    stop_level = min(stop_level, new_stop)
-                    if h >= stop_level:
-                        position.exit_time, position.exit_price, position.exit_reason = ts, stop_level, "trailing_stop"
-                        trades.append(position)
-                        position = None
-                        pattern = None
+                if trail_points is not None:
+                    if position.direction == "LONG":
+                        extreme = max(extreme, h)
+                        new_stop = extreme - trail_points
+                        stop_level = max(stop_level, new_stop)
+                        if l <= stop_level:
+                            position.exit_time, position.exit_price, position.exit_reason = ts, stop_level, "trailing_stop"
+                            trades.append(position)
+                            position = None
+                            pattern = None
+                    else:
+                        extreme = min(extreme, l)
+                        new_stop = extreme + trail_points
+                        stop_level = min(stop_level, new_stop)
+                        if h >= stop_level:
+                            position.exit_time, position.exit_price, position.exit_reason = ts, stop_level, "trailing_stop"
+                            trades.append(position)
+                            position = None
+                            pattern = None
                 continue
 
             if pattern is None or time_str >= FORCE_FLAT_TIME:
@@ -142,13 +150,13 @@ def run(
                 entry_price = pattern["high"]
                 position = Trade(date=d, direction="LONG", entry_time=ts, entry_price=entry_price, lot_size=lot_size)
                 extreme = h
-                stop_level = entry_price - trail_points
+                stop_level = (entry_price - trail_points) if trail_points is not None else None
                 pattern = None
             elif pattern["direction"] == "down" and l < pattern["low"]:
                 entry_price = pattern["low"]
                 position = Trade(date=d, direction="SHORT", entry_time=ts, entry_price=entry_price, lot_size=lot_size)
                 extreme = l
-                stop_level = entry_price + trail_points
+                stop_level = (entry_price + trail_points) if trail_points is not None else None
                 pattern = None
 
         if position is not None:
