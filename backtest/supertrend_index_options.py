@@ -1,75 +1,75 @@
-"""Supertrend stop-and-reverse (backtest/supertrend.py), realized through
-ATM options instead of futures notional.
+"""Supertrend stop-and-reverse (same signal as supertrend_percent_equity.py
+-- computed directly on the NIFTY 50 INDEX, not futures), realized through
+real ATM NIFTY options instead of a synthetic percent-of-equity notional.
 
-Same Supertrend(period, multiplier) direction series on 5-minute NIFTY
-futures bars, continuous across the whole date range. Positional, not
-intraday: a position can carry overnight and across multiple days, with
-no forced daily flattening --
-
+Signal: Supertrend(period, multiplier) on index bars resampled to
+bar_minutes (15 by default, matching the just-validated index backtest),
+continuous across the whole date range. Positional, no daily flatten --
     direction flips bullish -> sell any PE, buy ATM CE
     direction flips bearish -> sell any CE, buy ATM PE
+Exits: the next opposite flip, the held option's own expiry (forced out,
+can't hold past it), or the end of the backtest window.
 
-The only exits are the next opposite flip, the position's own option
-contract expiring (an option can't be held past its expiry -- forced
-out at the last available price on or before the expiry date, reason
-"expiry"), or the end of the backtest window.
+NIFTY options are WEEKLY, not monthly -- this is a real structural
+friction for a positional strategy: even when the Supertrend signal
+wants to hold for multiple weeks, the specific option contract bought
+on entry expires within days, forcing a rollover (fresh ATM pick,
+fresh theta clock) the strategy wouldn't face trading the index or
+futures directly. Expect many more "expiry" exits here than "reverse"
+exits when the signal's average hold is longer than the option's
+remaining life at entry -- that's the real cost this module is built to
+surface honestly, not a bug.
 
-Each 5-min bucket is labeled by its start time, but the direction it
-produces is only knowable once that bucket's last 1-min candle closes
-(+bar_minutes) -- exactly the fill-pricing issue fixed in
-futures_oi_buildup.py. Fills here are looked up from that same true
-decision time, not the bucket's start label.
+Each bar is labeled by its start time; the direction it confirms is
+only knowable once that bucket's last 1-min candle closes
+(+bar_minutes) -- same fill-pricing fix as futures_oi_buildup.py,
+generalized to an arbitrary bar size instead of the fixed +5min.
 
-Optional max_daily_profit / max_daily_loss: once realized net P&L for
-the calendar day a trade CLOSES on reaches either threshold, no new
-entry is taken for the rest of that day (mirrors futures_oi_buildup.run).
-In this positional/always-in-the-market mode this only ever bites at
-the instant of a reversal (exit and re-entry happen on the same bar),
-since there's no other point where the strategy is flat and looking to
-open a fresh position.
+P&L realized per standard lot (contract["lot_size"], whatever Upstox's
+chain reports for that expiry), not percent-of-equity -- consistent
+with every other options-realized module in this codebase.
 """
 from __future__ import annotations
 
 from data_sources import cache, upstox_client
 from backtest import options_common as oc
 from backtest.futures_oi_buildup import _bar_at_or_after, _bar_at_or_before
-from backtest.iron_condor import UNDERLYING_KEY
 from backtest.macd_rsi2_momentum_options import OptionTrade
-from backtest.rsi2_5min_sar import _resample_5min
 from backtest.supertrend import _compute_supertrend
+from backtest.sweep_reclaim_breakout import _resample
+
+UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
 
 def run(
     from_date: str,
     to_date: str,
-    futures_key: str,
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
+    bar_minutes: int = 15,
     period: int = 10,
-    multiplier: float = 3.0,
+    multiplier: float = 2.5,
     access_token: str | None = None,
-    futures_expired: bool = False,
     max_daily_profit: float | None = None,
     max_daily_loss: float | None = None,
 ) -> list[OptionTrade]:
-    if futures_expired:
-        raw_days = upstox_client.get_expired_candles(futures_key, "day", to_date, from_date, access_token)
-        fut_days = [{"date": d} for d in sorted({c[0][:10] for c in raw_days})]
-    else:
-        fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
-
-    all_5min: list[list] = []
-    for day in fut_days:
-        rows_1min = sorted(
-            cache.get_day_candles_cached(futures_key, "1minute", day["date"], expired=futures_expired, access_token=access_token),
+    trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
+    all_1min: list[list] = []
+    for day in trading_days:
+        rows = sorted(
+            cache.get_day_candles_cached(underlying_key, "1minute", day["date"], expired=False),
             key=lambda c: c[0],
         )
-        all_5min.extend(_resample_5min(rows_1min))
-    all_5min.sort(key=lambda c: c[0])
-    if len(all_5min) < period + 2:
+        all_1min.extend(rows)
+    all_1min.sort(key=lambda c: c[0])
+    if not all_1min:
         return []
 
-    direction = _compute_supertrend(all_5min, period, multiplier)
+    bars = _resample(all_1min, bar_minutes)
+    if len(bars) < period + 2:
+        return []
+
+    direction = _compute_supertrend(bars, period, multiplier)
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
@@ -95,8 +95,8 @@ def run(
     daily_pnl = 0.0
     day_halted = False
 
-    for i, row in enumerate(all_5min):
-        ts, o, h, l, c, v, oi = row
+    for i, bar in enumerate(bars):
+        ts, o, h, l, c, v, oi = bar
         d = ts[:10]
         time_str = ts[11:16]
         dirn = direction[i]
@@ -106,10 +106,7 @@ def run(
             daily_pnl = 0.0
             day_halted = False
 
-        # Bucket labeled by start time; the flip it confirms is only knowable
-        # once that bucket's last 1-min candle closes (+5 min). Same fix as
-        # futures_oi_buildup.py.
-        _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + 5, 60)
+        _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + bar_minutes, 60)
         decision_time_str = f"{_dh:02d}:{_dm:02d}"
 
         if dirn is None:
@@ -126,11 +123,11 @@ def run(
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
             if contract is None or not candles:
                 return
-            bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
-            if bar is None:
+            bar_ = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
+            if bar_ is None:
                 return
             position = {
-                "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                "direction": direction_label, "entry_time": bar_[0], "entry_price": bar_[4],
                 "strike": contract["strike_price"], "expiry": expiry,
                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
             }
@@ -140,20 +137,21 @@ def run(
             if position is None:
                 return
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], as_of_date, position["expiry"])
-            bar = None
+            bar_ = None
             if candles:
                 if use_last_bar:
                     # Forced expiry exit: as_of_date is the contract's LAST
-                    # trading day, discovered from a LATER bar -- that bar's
-                    # decision_time_str is a different day's clock and must
-                    # not be matched against this day's candles (can land
-                    # before the entry time on the same day). Use the day's
-                    # last traded price instead, like a real settlement.
-                    bar = candles[-1]
+                    # trading day, discovered from a LATER bar (the one that
+                    # noticed d > expiry) -- that later bar's decision_time_str
+                    # is a different day's clock and must not be matched
+                    # against this day's candles (it can land before the
+                    # entry time on the same day). Use the day's last traded
+                    # price instead, like a real expiry settlement.
+                    bar_ = candles[-1]
                 else:
-                    bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
-            exit_price = bar[4] if bar else position["entry_price"]
-            exit_time = bar[0] if bar else ts
+                    bar_ = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
+            exit_price = bar_[4] if bar_ else position["entry_price"]
+            exit_time = bar_[0] if bar_ else ts
             trade = OptionTrade(
                 date=position["date"], direction=position["direction"], expiry=position["expiry"],
                 strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
@@ -167,8 +165,6 @@ def run(
             ):
                 day_halted = True
 
-        # An option can't be held past its own expiry -- force out at the
-        # last available price on or before the expiry date.
         if position is not None and d > position["expiry"]:
             _exit("expiry", position["expiry"], use_last_bar=True)
             prev_dir = dirn
@@ -182,11 +178,11 @@ def run(
         prev_dir = dirn
 
     if position is not None:
-        as_of = min(position["expiry"], all_5min[-1][0][:10])
+        as_of = min(position["expiry"], bars[-1][0][:10])
         _, candles = _atm_option_candles(position["strike"], position["opt_type"], as_of, position["expiry"])
         last_bar = candles[-1] if candles else None
         exit_price = last_bar[4] if last_bar else position["entry_price"]
-        exit_time = last_bar[0] if last_bar else all_5min[-1][0]
+        exit_time = last_bar[0] if last_bar else bars[-1][0]
         trades.append(OptionTrade(
             date=position["date"], direction=position["direction"], expiry=position["expiry"],
             strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
