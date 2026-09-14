@@ -2,28 +2,37 @@
 ATM options instead of futures notional.
 
 Same Supertrend(period, multiplier) direction series on 5-minute NIFTY
-futures bars, continuous across the date range, reset to flat/no-signal
-at the start of each day (only trades on an intraday flip, matching
-supertrend.py):
+futures bars, continuous across the whole date range. Positional, not
+intraday: a position can carry overnight and across multiple days, with
+no forced daily flattening --
 
     direction flips bullish -> sell any PE, buy ATM CE
     direction flips bearish -> sell any CE, buy ATM PE
 
-Forced flat before FORCE_FLAT_TIME. Each 5-min bucket is labeled by its
-start time, but the direction it produces is only knowable once that
-bucket's last 1-min candle closes (+bar_minutes) -- exactly the
-fill-pricing issue fixed in futures_oi_buildup.py. Fills here are looked
-up from that same true decision time, not the bucket's start label.
+The only exits are the next opposite flip, the position's own option
+contract expiring (an option can't be held past its expiry -- forced
+out at the last available price on or before the expiry date, reason
+"expiry"), or the end of the backtest window.
+
+Each 5-min bucket is labeled by its start time, but the direction it
+produces is only knowable once that bucket's last 1-min candle closes
+(+bar_minutes) -- exactly the fill-pricing issue fixed in
+futures_oi_buildup.py. Fills here are looked up from that same true
+decision time, not the bucket's start label.
 
 Optional max_daily_profit / max_daily_loss: once realized net P&L for
-the day reaches either threshold, no new entries are taken for the rest
-of that day (mirrors futures_oi_buildup.run).
+the calendar day a trade CLOSES on reaches either threshold, no new
+entry is taken for the rest of that day (mirrors futures_oi_buildup.run).
+In this positional/always-in-the-market mode this only ever bites at
+the instant of a reversal (exit and re-entry happen on the same bar),
+since there's no other point where the strategy is flat and looking to
+open a fresh position.
 """
 from __future__ import annotations
 
 from data_sources import cache, upstox_client
 from backtest import options_common as oc
-from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
+from backtest.futures_oi_buildup import _bar_at_or_after, _bar_at_or_before
 from backtest.iron_condor import UNDERLYING_KEY
 from backtest.macd_rsi2_momentum_options import OptionTrade
 from backtest.rsi2_5min_sar import _resample_5min
@@ -96,7 +105,6 @@ def run(
             current_day = d
             daily_pnl = 0.0
             day_halted = False
-            prev_dir = None  # don't carry a stale flip across the overnight gap
 
         # Bucket labeled by start time; the flip it confirms is only knowable
         # once that bucket's last 1-min candle closes (+5 min). Same fix as
@@ -127,11 +135,11 @@ def run(
                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
             }
 
-        def _exit(reason: str) -> None:
+        def _exit(reason: str, as_of_date: str) -> None:
             nonlocal position, daily_pnl, day_halted
             if position is None:
                 return
-            _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
+            _, candles = _atm_option_candles(position["strike"], position["opt_type"], as_of_date, position["expiry"])
             bar = None
             if candles:
                 bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
@@ -150,21 +158,23 @@ def run(
             ):
                 day_halted = True
 
-        if time_str >= FORCE_FLAT_TIME:
-            if position is not None:
-                _exit("eod")
+        # An option can't be held past its own expiry -- force out at the
+        # last available price on or before the expiry date.
+        if position is not None and d > position["expiry"]:
+            _exit("expiry", position["expiry"])
             prev_dir = dirn
             continue
 
         if prev_dir is not None and dirn != prev_dir:
             if position is not None:
-                _exit("reverse")
+                _exit("reverse", d)
             _enter("LONG" if dirn == 1 else "SHORT")
 
         prev_dir = dirn
 
     if position is not None:
-        _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
+        as_of = min(position["expiry"], all_5min[-1][0][:10])
+        _, candles = _atm_option_candles(position["strike"], position["opt_type"], as_of, position["expiry"])
         last_bar = candles[-1] if candles else None
         exit_price = last_bar[4] if last_bar else position["entry_price"]
         exit_time = last_bar[0] if last_bar else all_5min[-1][0]

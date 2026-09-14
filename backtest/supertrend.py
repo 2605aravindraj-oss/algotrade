@@ -20,17 +20,19 @@ when close breaks below final_lower (else holds the previous direction,
 band trailing as usual). Supertrend line = final_lower while bullish,
 final_upper while bearish.
 
-Trading rule (always in the market -- stop and reverse):
+Trading rule (always in the market -- stop and reverse, positional, no
+daily flattening):
     direction flips bullish -> exit any short, go LONG at this bar's close
     direction flips bearish -> exit any long, go SHORT at this bar's close
-Forced flat at FORCE_FLAT_TIME (no overnight position); the next flip
-after that re-enters as usual. One trade open at a time.
+A position can carry overnight and across multiple days; the only exits
+are the next opposite flip, or the end of the backtest window (which
+closes out at the last available bar). One trade open at a time.
 """
 from __future__ import annotations
 
 from data_sources import cache, upstox_client
 from backtest.rsi2_5min_sar import _resample_5min
-from backtest.rsi2_reversion import Trade, FORCE_FLAT_TIME, UNDERLYING_KEY
+from backtest.rsi2_reversion import Trade, UNDERLYING_KEY
 
 
 def _compute_supertrend(
@@ -125,7 +127,6 @@ def run(
     trades: list[Trade] = []
     position: Trade | None = None
     prev_dir: int | None = None
-    current_day: str | None = None
 
     def _close(t: Trade, ts: str, price: float, reason: str) -> None:
         t.exit_time = ts
@@ -136,24 +137,9 @@ def run(
     for i, bar in enumerate(all_5min):
         ts, o, h, l, c, v, oi = bar
         d = ts[:10]
-        time_str = ts[11:16]
         dirn = direction[i]
 
-        if d != current_day:
-            current_day = d
-            if position is not None:
-                _close(position, ts, o, "eod")
-                position = None
-            prev_dir = None  # don't carry a stale flip across the overnight gap
-
         if dirn is None:
-            continue
-
-        if time_str >= FORCE_FLAT_TIME:
-            if position is not None:
-                _close(position, ts, c, "eod")
-                position = None
-            prev_dir = dirn
             continue
 
         if prev_dir is not None and dirn != prev_dir:

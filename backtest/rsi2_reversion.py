@@ -18,6 +18,7 @@ is reported in points and in rupees at a configurable lot size.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from data_sources import cache, upstox_client
 
@@ -73,13 +74,25 @@ class Trade:
     def hold_minutes(self) -> int | None:
         if self.exit_time is None:
             return None
-        return _minutes_between(self.entry_time[11:16], self.exit_time[11:16])
+        # Full-timestamp diff (not just time-of-day) so a position that
+        # carries across days -- e.g. a positional/swing strategy with no
+        # daily flatten -- reports a real elapsed duration instead of a
+        # same-day-only, possibly-negative time-of-day delta.
+        return _minutes_between_timestamps(self.entry_time, self.exit_time)
 
 
 def _minutes_between(t1: str, t2: str) -> int:
+    """Same-day time-of-day delta in minutes (t1, t2 as 'HH:MM'). Used for
+    same-day intrabar checks (e.g. a max-hold-time exit rule) where both
+    inputs are known to be on the same trading day."""
     h1, m1 = int(t1[:2]), int(t1[3:5])
     h2, m2 = int(t2[:2]), int(t2[3:5])
     return (h2 * 60 + m2) - (h1 * 60 + m1)
+
+
+def _minutes_between_timestamps(ts1: str, ts2: str) -> int:
+    """Full ISO-timestamp diff in minutes -- correct across day boundaries."""
+    return int((datetime.fromisoformat(ts2) - datetime.fromisoformat(ts1)).total_seconds() // 60)
 
 
 def compute_rsi(closes: list[float], period: int = 2) -> list[float | None]:
