@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.live_nifty_state.json
+.live_oi_buildup_state.json
+.live_oi_buildup_state_v2.json
