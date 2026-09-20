@@ -42,37 +42,27 @@ and low breakout at once (a wide-range candle), the high breakout is
 checked first -- a simplification, not a claim about true intrabar
 order, which OHLC bars can't resolve.
 
-Stop-loss and target (in underlying INDEX points, not option premium --
-the option is just how the trade is realized): the sweep candle's own
-range is the risk unit.
-    LONG:  entry = pattern High, stop = pattern Low,
-           target = entry + target_multiple * (pattern High - pattern Low)
-    SHORT: entry = pattern Low,  stop = pattern High,
-           target = entry - target_multiple * (pattern High - pattern Low)
-A fixed 1:target_multiple risk/reward (default 2.0, i.e. 1:2) -- but
-reaching target does NOT close the trade. Instead it flips the
-position into trailing mode: the stop jumps to lock in (target -
-1*risk) -- i.e. at least +1R -- and from then on ratchets to stay
-exactly one risk-unit behind the best price seen since. This exists
-because the fixed-target version was found to cut winners short on
-exactly the days it shouldn't: a strong trend that reaches 2R is
-usually not done, and it kept re-entering the same direction moments
-after taking profit (see the 2026-09-15 trade log, where trades 3 and
-4 were really one continuous move split in half by the target). Once
-trailing, the position exits the instant price reverses through the
-trailing stop -- there is no longer a hard target. Checked bar-by-bar
-against the INDEX bar's high/low (not the option's); if a bar's range
-would touch both stop and target/trailing-stop in the same bar, the
-stop side is assumed to trigger first (conservative). The actual fill
-is still the option's own premium at that bar's time, same as every
-other exit here -- the index level only decides *when* to exit, not
-the option's price.
+Stop-loss and target are on the OPTION PREMIUM itself, not the
+underlying index -- a straight points move in whatever was bought
+(ATM CE for a LONG signal, ATM PE for a SHORT signal), since either
+way the position is a bought option and wants its premium to rise:
+    stop   = entry premium - sl_points   (default 5)
+    target = entry premium + target_points  (default 5)
+Checked bar-by-bar against the OPTION's own 1-minute candle high/low
+(not the index's) -- if a bar's range would touch both in the same
+bar, the stop side is assumed to trigger first (conservative). This
+replaced an earlier version of this module that sized stop/target off
+the underlying index (the sweep candle's own range as the risk unit,
+with a 1:2/1:3 index-point target and a later trailing-stop variant);
+that approach was dropped because an index-level target doesn't
+reliably track option premium P&L -- a bought option can lose value
+to theta/IV even while the index itself is moving favorably, and gain
+even while its target is technically still points away.
 
-Exit: stop-loss, trailing-stop (after target is first reached), or
-forced flat at FORCE_FLAT_TIME -- there is no more "exit on the next
-opposite signal": once in a trade, a fresh sweep/breakout is tracked
-(so the next setup is ready) but does not close the current position
-early. One position at a time.
+Exit: stop-loss, target, or forced flat at FORCE_FLAT_TIME -- there
+is no more "exit on the next opposite signal": once in a trade, a
+fresh sweep/breakout is tracked (so the next setup is ready) but does
+not close the current position early. One position at a time.
 
 The breakout confirmation itself (a 1-min candle's own high/low vs. the
 pattern) needs no such correction -- it trades native 1-minute bars for
@@ -133,7 +123,8 @@ def run(
     strike_step: int = 50,
     ema_fast: int = 9,
     ema_slow: int = 20,
-    target_multiple: float = 2.0,
+    sl_points: float = 5.0,
+    target_points: float = 5.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -204,19 +195,14 @@ def run(
             bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
             if bar is None:
                 return
-            risk = pattern_high - pattern_low
-            if direction_label == "LONG":
-                stop_level = pattern_low
-                target_level = pattern_high + target_multiple * risk
-            else:
-                stop_level = pattern_high
-                target_level = pattern_low - target_multiple * risk
+            entry_price = bar[4]
             position = {
-                "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                "direction": direction_label, "entry_time": bar[0], "entry_price": entry_price,
                 "strike": contract["strike_price"], "expiry": expiry,
                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
-                "stop_level": stop_level, "target_level": target_level, "risk": risk,
-                "trailing": False, "extreme": None,
+                "stop_level": entry_price - sl_points, "target_level": entry_price + target_points,
+                # bar[0][11:16] -> (high, low), for O(1) same-day premium lookups
+                "opt_by_time": {c[0][11:16]: (c[2], c[3]) for c in candles},
             }
 
         def _exit(reason: str) -> None:
@@ -242,27 +228,13 @@ def run(
             continue
 
         if position is not None:
-            risk = position["risk"]
-            if position["direction"] == "LONG":
-                if l <= position["stop_level"]:
-                    _exit("trailing_stop" if position["trailing"] else "stop_loss")
-                elif not position["trailing"] and h >= position["target_level"]:
-                    position["trailing"] = True
-                    position["extreme"] = h
-                    position["stop_level"] = position["target_level"] - risk
-                elif position["trailing"]:
-                    position["extreme"] = max(position["extreme"], h)
-                    position["stop_level"] = max(position["stop_level"], position["extreme"] - risk)
-            else:
-                if h >= position["stop_level"]:
-                    _exit("trailing_stop" if position["trailing"] else "stop_loss")
-                elif not position["trailing"] and l <= position["target_level"]:
-                    position["trailing"] = True
-                    position["extreme"] = l
-                    position["stop_level"] = position["target_level"] + risk
-                elif position["trailing"]:
-                    position["extreme"] = min(position["extreme"], l)
-                    position["stop_level"] = min(position["stop_level"], position["extreme"] + risk)
+            opt_hl = position["opt_by_time"].get(time_str)
+            if opt_hl is not None:
+                opt_h, opt_l = opt_hl
+                if opt_l <= position["stop_level"]:
+                    _exit("stop_loss")
+                elif opt_h >= position["target_level"]:
+                    _exit("target")
 
         e9, e20 = ema9[i], ema20[i]
         swept = any(
