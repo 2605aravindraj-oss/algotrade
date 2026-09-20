@@ -54,7 +54,13 @@ way the position is a bought option and wants its premium to rise:
 Checked bar-by-bar against the OPTION's own candle high/low, resampled
 to the same candle_minutes as the pattern (not the index's) -- if a
 bar's range would touch both in the same bar, the stop side is
-assumed to trigger first (conservative). This
+assumed to trigger first (conservative). Both entries and stop/target
+exits fill at the option's price as of that candle's CLOSE (bucket
+start + candle_minutes), never its start -- a breakout or a stop/
+target touch is only knowable once the whole bucket has printed, so
+filling any earlier would be look-ahead. Same fix as
+supertrend_options.py's decision_time_str, generalized here to an
+arbitrary candle_minutes instead of a fixed +5. This
 replaced an earlier version of this module that sized stop/target off
 the underlying index (the sweep candle's own range as the risk unit,
 with a 1:2/1:3 index-point target and a later trailing-stop variant);
@@ -192,6 +198,14 @@ def run(
         atm = oc.round_to_step(c, strike_step)
         expiry = next((e for e in expiries if e >= d), None)
 
+        # This bar's own condition (breakout confirmed / stop-target
+        # touched somewhere in its range) is only knowable once the WHOLE
+        # candle_minutes bucket has closed -- fill there, not at the
+        # bucket's start. Same fix as supertrend_options.py /
+        # supertrend_index_options.py, generalized to candle_minutes.
+        _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + candle_minutes, 60)
+        decision_time_str = f"{_dh:02d}:{_dm:02d}"
+
         def _enter(direction_label: str, pattern_high: float, pattern_low: float) -> None:
             nonlocal position
             if expiry is None:
@@ -200,7 +214,7 @@ def run(
             contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
             if contract is None or not candles:
                 return
-            bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
+            bar = _bar_at_or_after(candles, decision_time_str) or _bar_at_or_before(candles, decision_time_str)
             if bar is None:
                 return
             entry_price = bar[4]
@@ -214,14 +228,14 @@ def run(
                 "opt_by_time": {b[0][11:16]: (b[2], b[3]) for b in opt_bars},
             }
 
-        def _exit(reason: str) -> None:
+        def _exit(reason: str, fill_time_str: str) -> None:
             nonlocal position
             if position is None:
                 return
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
             bar = None
             if candles:
-                bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
+                bar = _bar_at_or_after(candles, fill_time_str) or _bar_at_or_before(candles, fill_time_str)
             exit_price = bar[4] if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
             trades.append(OptionTrade(
@@ -233,7 +247,9 @@ def run(
 
         if time_str >= FORCE_FLAT_TIME:
             if position is not None:
-                _exit("eod")
+                # already at/past the flatten threshold -- no future bar
+                # needed, fill at this bar's own time
+                _exit("eod", time_str)
             continue
 
         if position is not None:
@@ -241,9 +257,9 @@ def run(
             if opt_hl is not None:
                 opt_h, opt_l = opt_hl
                 if opt_l <= position["stop_level"]:
-                    _exit("stop_loss")
+                    _exit("stop_loss", decision_time_str)
                 elif opt_h >= position["target_level"]:
-                    _exit("target")
+                    _exit("target", decision_time_str)
 
         e9, e20 = ema9[i], ema20[i]
         swept = any(
