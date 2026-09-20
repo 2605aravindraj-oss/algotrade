@@ -69,6 +69,15 @@ reliably track option premium P&L -- a bought option can lose value
 to theta/IV even while the index itself is moving favorably, and gain
 even while its target is technically still points away.
 
+Optional trend_filter (off by default): when on, a breakout is only
+taken in the direction the EMAs already agree on --
+    LONG  only if EMA9 > EMA20 (fast above slow, i.e. uptrend)
+    SHORT only if EMA9 < EMA20 (fast below slow, i.e. downtrend)
+using that same bar's decision-time-correct EMA values. A breakout
+against the prevailing EMA order is skipped entirely (no trade, not a
+reversal) -- the pattern still lapses either way (a fresh sweep is
+needed for another attempt), it just doesn't buy an option this time.
+
 Exit: stop-loss, target, or forced flat at FORCE_FLAT_TIME -- there
 is no more "exit on the next opposite signal": once in a trade, a
 fresh sweep/breakout is tracked (so the next setup is ready) but does
@@ -138,6 +147,7 @@ def run(
     candle_minutes: int = 1,
     sl_points: float = 5.0,
     target_points: float = 5.0,
+    trend_filter: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -273,11 +283,15 @@ def run(
             continue
 
         if position is None and pattern is not None:
+            long_ok = not trend_filter or (e9 is not None and e20 is not None and e9 > e20)
+            short_ok = not trend_filter or (e9 is not None and e20 is not None and e9 < e20)
             if h > pattern["high"]:
-                _enter("LONG", pattern["high"], pattern["low"])
+                if long_ok:
+                    _enter("LONG", pattern["high"], pattern["low"])
                 pattern = None
             elif l < pattern["low"]:
-                _enter("SHORT", pattern["high"], pattern["low"])
+                if short_ok:
+                    _enter("SHORT", pattern["high"], pattern["low"])
                 pattern = None
 
     if position is not None:
