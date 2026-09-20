@@ -49,18 +49,30 @@ range is the risk unit.
            target = entry + target_multiple * (pattern High - pattern Low)
     SHORT: entry = pattern Low,  stop = pattern High,
            target = entry - target_multiple * (pattern High - pattern Low)
-A fixed 1:target_multiple risk/reward (default 2.0, i.e. 1:2). Checked
-bar-by-bar against the INDEX bar's high/low (not the option's); if a
-bar's range would touch both stop
-and target, the stop is assumed to trigger first (conservative). The
-actual fill is still the option's own premium at that bar's time, same
-as every other exit here -- the index level only decides *when* to
-exit, not the option's price.
+A fixed 1:target_multiple risk/reward (default 2.0, i.e. 1:2) -- but
+reaching target does NOT close the trade. Instead it flips the
+position into trailing mode: the stop jumps to lock in (target -
+1*risk) -- i.e. at least +1R -- and from then on ratchets to stay
+exactly one risk-unit behind the best price seen since. This exists
+because the fixed-target version was found to cut winners short on
+exactly the days it shouldn't: a strong trend that reaches 2R is
+usually not done, and it kept re-entering the same direction moments
+after taking profit (see the 2026-09-15 trade log, where trades 3 and
+4 were really one continuous move split in half by the target). Once
+trailing, the position exits the instant price reverses through the
+trailing stop -- there is no longer a hard target. Checked bar-by-bar
+against the INDEX bar's high/low (not the option's); if a bar's range
+would touch both stop and target/trailing-stop in the same bar, the
+stop side is assumed to trigger first (conservative). The actual fill
+is still the option's own premium at that bar's time, same as every
+other exit here -- the index level only decides *when* to exit, not
+the option's price.
 
-Exit: stop-loss, target, or forced flat at FORCE_FLAT_TIME -- there is
-no more "exit on the next opposite signal": once in a trade, a fresh
-sweep/breakout is tracked (so the next setup is ready) but does not
-close the current position early. One position at a time.
+Exit: stop-loss, trailing-stop (after target is first reached), or
+forced flat at FORCE_FLAT_TIME -- there is no more "exit on the next
+opposite signal": once in a trade, a fresh sweep/breakout is tracked
+(so the next setup is ready) but does not close the current position
+early. One position at a time.
 
 The breakout confirmation itself (a 1-min candle's own high/low vs. the
 pattern) needs no such correction -- it trades native 1-minute bars for
@@ -203,7 +215,8 @@ def run(
                 "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
                 "strike": contract["strike_price"], "expiry": expiry,
                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
-                "stop_level": stop_level, "target_level": target_level,
+                "stop_level": stop_level, "target_level": target_level, "risk": risk,
+                "trailing": False, "extreme": None,
             }
 
         def _exit(reason: str) -> None:
@@ -229,16 +242,27 @@ def run(
             continue
 
         if position is not None:
+            risk = position["risk"]
             if position["direction"] == "LONG":
                 if l <= position["stop_level"]:
-                    _exit("stop_loss")
-                elif h >= position["target_level"]:
-                    _exit("target")
+                    _exit("trailing_stop" if position["trailing"] else "stop_loss")
+                elif not position["trailing"] and h >= position["target_level"]:
+                    position["trailing"] = True
+                    position["extreme"] = h
+                    position["stop_level"] = position["target_level"] - risk
+                elif position["trailing"]:
+                    position["extreme"] = max(position["extreme"], h)
+                    position["stop_level"] = max(position["stop_level"], position["extreme"] - risk)
             else:
                 if h >= position["stop_level"]:
-                    _exit("stop_loss")
-                elif l <= position["target_level"]:
-                    _exit("target")
+                    _exit("trailing_stop" if position["trailing"] else "stop_loss")
+                elif not position["trailing"] and l <= position["target_level"]:
+                    position["trailing"] = True
+                    position["extreme"] = l
+                    position["stop_level"] = position["target_level"] + risk
+                elif position["trailing"]:
+                    position["extreme"] = min(position["extreme"], l)
+                    position["stop_level"] = min(position["stop_level"], position["extreme"] + risk)
 
         e9, e20 = ema9[i], ema20[i]
         swept = any(
