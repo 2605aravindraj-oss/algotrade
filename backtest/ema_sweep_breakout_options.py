@@ -1,0 +1,201 @@
+"""EMA9/EMA20 sweep-and-breakout on 1-minute NIFTY 50 index bars,
+realized through real ATM NIFTY options. Intraday only (forced flat at
+FORCE_FLAT_TIME, no overnight position).
+
+Signal: EMA9 and EMA20 on 1-minute closes, continuous across the whole
+date range (needs warm-up; not reset daily -- a fast EMA needs real
+continuity to mean anything).
+
+A candle "sweeps" an EMA when its range crosses through the line but it
+closes back on the side it started from:
+    sweep ABOVE: candle High > EMA and Close <= EMA
+                 (price poked above the average, closed back under it)
+    sweep BELOW: candle Low  < EMA and Close >= EMA
+                 (price poked below the average, closed back over it)
+Either kind of sweep (against EMA9 or EMA20 -- whichever fires) marks
+that candle's own High and Low as breakout trigger levels for what
+follows. This is deliberately bidirectional: a sweep is read as "price
+tested the average and got rejected for now," and it's the FOLLOW-
+THROUGH breakout, not the sweep itself, that decides direction --
+    next candle's High > pattern High -> BUY  (long, buy ATM CE)
+    next candle's Low  < pattern Low  -> SELL (short, buy ATM PE)
+A fresh sweep replaces any earlier still-pending one (most recent
+evidence wins). If a single candle's range would trigger both the high
+and low breakout at once (a wide-range candle), the high breakout is
+checked first -- a simplification, not a claim about true intrabar
+order, which OHLC bars can't resolve.
+
+Exit: the next opposite-direction entry signal (reverse) or forced flat
+at FORCE_FLAT_TIME -- no separate stop-loss or target. One position at
+a time; while in a trade, new sweep patterns still get tracked so the
+next setup is ready the moment the position closes.
+
+Same decision-time consideration as futures_oi_buildup.py does NOT
+apply here: this trades native 1-minute bars (no resampling into a
+bigger bucket), so a bar's own close fully confirms its own signal --
+there is no earlier, not-yet-knowable label to correct for.
+"""
+from __future__ import annotations
+
+from data_sources import cache, upstox_client
+from backtest import options_common as oc
+from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
+from backtest.macd_rsi2_momentum_options import OptionTrade
+
+UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
+
+
+def _ema(values: list[float], period: int) -> list[float | None]:
+    n = len(values)
+    out: list[float | None] = [None] * n
+    if n < period:
+        return out
+    k = 2 / (period + 1)
+    out[period - 1] = sum(values[:period]) / period
+    for i in range(period, n):
+        out[i] = values[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def run(
+    from_date: str,
+    to_date: str,
+    underlying_key: str = UNDERLYING_KEY,
+    strike_step: int = 50,
+    ema_fast: int = 9,
+    ema_slow: int = 20,
+    access_token: str | None = None,
+) -> list[OptionTrade]:
+    trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
+    all_1min: list[list] = []
+    for day in trading_days:
+        rows = sorted(
+            cache.get_day_candles_cached(underlying_key, "1minute", day["date"], expired=False),
+            key=lambda c: c[0],
+        )
+        all_1min.extend(rows)
+    all_1min.sort(key=lambda c: c[0])
+    if len(all_1min) < ema_slow + 2:
+        return []
+
+    closes = [c[4] for c in all_1min]
+    ema9 = _ema(closes, ema_fast)
+    ema20 = _ema(closes, ema_slow)
+
+    expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
+    chain_cache: dict[str, dict] = {}
+
+    def _atm_option_candles(strike, opt_type, date, expiry):
+        if expiry not in chain_cache:
+            chain_cache[expiry] = oc.build_chain_lookup(
+                cache.get_expired_option_chain_cached(underlying_key, expiry, access_token)
+            )
+        lookup = chain_cache[expiry]
+        contract = oc.nearest_contract(lookup, strike, opt_type)
+        if contract is None:
+            return None, None
+        candles = cache.get_day_candles_cached(
+            contract["instrument_key"], "1minute", date, expired=True, access_token=access_token
+        )
+        return contract, sorted(candles, key=lambda c: c[0])
+
+    trades: list[OptionTrade] = []
+    position = None  # dict: direction, entry_time, entry_price(premium), strike, expiry, lot_size, opt_type, date
+    pattern = None    # dict: high, low
+    current_day: str | None = None
+
+    for i, row in enumerate(all_1min):
+        ts, o, h, l, c, v, oi = row
+        d = ts[:10]
+        time_str = ts[11:16]
+
+        if d != current_day:
+            current_day = d
+            pattern = None
+            # never carry a position across a day boundary
+            position = None
+
+        atm = oc.round_to_step(c, strike_step)
+        expiry = next((e for e in expiries if e >= d), None)
+
+        def _enter(direction_label: str) -> None:
+            nonlocal position
+            if expiry is None:
+                return
+            opt_type = "CE" if direction_label == "LONG" else "PE"
+            contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
+            if contract is None or not candles:
+                return
+            bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
+            if bar is None:
+                return
+            position = {
+                "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                "strike": contract["strike_price"], "expiry": expiry,
+                "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
+            }
+
+        def _exit(reason: str) -> None:
+            nonlocal position
+            if position is None:
+                return
+            _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
+            bar = None
+            if candles:
+                bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
+            exit_price = bar[4] if bar else position["entry_price"]
+            exit_time = bar[0] if bar else ts
+            trades.append(OptionTrade(
+                date=position["date"], direction=position["direction"], expiry=position["expiry"],
+                strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason=reason,
+            ))
+            position = None
+
+        if time_str >= FORCE_FLAT_TIME:
+            if position is not None:
+                _exit("eod")
+            continue
+
+        e9, e20 = ema9[i], ema20[i]
+        swept = any(
+            ema_val is not None and ((h > ema_val and c <= ema_val) or (l < ema_val and c >= ema_val))
+            for ema_val in (e9, e20)
+        )
+        if swept:
+            # the candle that creates the pattern can't also confirm its
+            # own breakout -- wait for the next one
+            pattern = {"high": h, "low": l}
+            continue
+
+        if pattern is not None:
+            if h > pattern["high"]:
+                if position is not None and position["direction"] == "SHORT":
+                    _exit("reverse")
+                if position is None:
+                    _enter("LONG")
+                pattern = None
+            elif l < pattern["low"]:
+                if position is not None and position["direction"] == "LONG":
+                    _exit("reverse")
+                if position is None:
+                    _enter("SHORT")
+                pattern = None
+
+    if position is not None:
+        _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
+        last_bar = candles[-1] if candles else None
+        exit_price = last_bar[4] if last_bar else position["entry_price"]
+        exit_time = last_bar[0] if last_bar else all_1min[-1][0]
+        trades.append(OptionTrade(
+            date=position["date"], direction=position["direction"], expiry=position["expiry"],
+            strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
+            exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason="eod_data_end",
+        ))
+
+    return trades
+
+
+def summary(trades: list[OptionTrade]) -> str:
+    from backtest.macd_rsi2_momentum_options import summary as _summary
+    return _summary(trades)
