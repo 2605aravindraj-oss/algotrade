@@ -46,11 +46,12 @@ Stop-loss and target (in underlying INDEX points, not option premium --
 the option is just how the trade is realized): the sweep candle's own
 range is the risk unit.
     LONG:  entry = pattern High, stop = pattern Low,
-           target = entry + 2 * (pattern High - pattern Low)
+           target = entry + target_multiple * (pattern High - pattern Low)
     SHORT: entry = pattern Low,  stop = pattern High,
-           target = entry - 2 * (pattern High - pattern Low)
-A fixed 1:2 risk/reward. Checked bar-by-bar against the INDEX bar's
-high/low (not the option's); if a bar's range would touch both stop
+           target = entry - target_multiple * (pattern High - pattern Low)
+A fixed 1:target_multiple risk/reward (default 2.0, i.e. 1:2). Checked
+bar-by-bar against the INDEX bar's high/low (not the option's); if a
+bar's range would touch both stop
 and target, the stop is assumed to trigger first (conservative). The
 actual fill is still the option's own premium at that bar's time, same
 as every other exit here -- the index level only decides *when* to
@@ -120,6 +121,7 @@ def run(
     strike_step: int = 50,
     ema_fast: int = 9,
     ema_slow: int = 20,
+    target_multiple: float = 2.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -193,10 +195,10 @@ def run(
             risk = pattern_high - pattern_low
             if direction_label == "LONG":
                 stop_level = pattern_low
-                target_level = pattern_high + 2 * risk
+                target_level = pattern_high + target_multiple * risk
             else:
                 stop_level = pattern_high
-                target_level = pattern_low - 2 * risk
+                target_level = pattern_low - target_multiple * risk
             position = {
                 "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
                 "strike": contract["strike_price"], "expiry": expiry,
