@@ -1,13 +1,30 @@
-"""EMA9/EMA20 sweep-and-breakout on 1-minute NIFTY 50 index bars,
-realized through real ATM NIFTY options. Intraday only (forced flat at
-FORCE_FLAT_TIME, no overnight position).
+"""EMA9/EMA20 sweep-and-breakout, realized through real ATM NIFTY
+options. Intraday only (forced flat at FORCE_FLAT_TIME, no overnight
+position).
 
-Signal: EMA9 and EMA20 on 1-minute closes, continuous across the whole
-date range (needs warm-up; not reset daily -- a fast EMA needs real
-continuity to mean anything).
+Multi-timeframe signal: EMA9 and EMA20 are computed on 15-MINUTE bars
+(continuous across the whole date range -- needs warm-up; not reset
+daily), but the sweep/breakout pattern itself is read off 1-MINUTE
+candles against those 15-min EMA lines. This is deliberately slower
+and smoother than computing the EMA on 1-minute closes directly (which
+produced far too many low-quality signals in an earlier version of
+this module) -- a 15-min EMA only moves meaningfully every 15 minutes,
+so far fewer 1-min candles will actually cross it.
 
-A candle "sweeps" an EMA when its range crosses through the line but it
-closes back on the side it started from:
+Decision-time correctness: a 1-minute candle can only react to a
+15-min EMA value from a bucket that has ALREADY CLOSED, never the
+bucket it's currently inside (that bucket's close, and therefore its
+EMA contribution, isn't known yet). Concretely, the 15-min bucket
+labeled "09:15" (covering 09:15-09:29) only becomes usable starting at
+its close, 09:30 -- so every 1-minute candle from 09:30 up to (but not
+including) 09:45 uses THAT bucket's EMA9/EMA20, not the "09:30" bucket
+forming under it. This is the same class of fill-pricing/lookahead fix
+made in futures_oi_buildup.py, generalized to a signal rather than a
+fill price.
+
+A candle "sweeps" an EMA when its range crosses through the (15-min,
+decision-time-correct) line but it closes back on the side it started
+from:
     sweep ABOVE: candle High > EMA and Close <= EMA
                  (price poked above the average, closed back under it)
     sweep BELOW: candle Low  < EMA and Close >= EMA
@@ -44,10 +61,9 @@ no more "exit on the next opposite signal": once in a trade, a fresh
 sweep/breakout is tracked (so the next setup is ready) but does not
 close the current position early. One position at a time.
 
-Same decision-time consideration as futures_oi_buildup.py does NOT
-apply here: this trades native 1-minute bars (no resampling into a
-bigger bucket), so a bar's own close fully confirms its own signal --
-there is no earlier, not-yet-knowable label to correct for.
+The breakout confirmation itself (a 1-min candle's own high/low vs. the
+pattern) needs no such correction -- it trades native 1-minute bars for
+that part, and a bar's own close fully confirms its own signal there.
 """
 from __future__ import annotations
 
@@ -55,6 +71,7 @@ from data_sources import cache, upstox_client
 from backtest import options_common as oc
 from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
 from backtest.macd_rsi2_momentum_options import OptionTrade
+from backtest.sweep_reclaim_breakout import _resample
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
@@ -68,6 +85,31 @@ def _ema(values: list[float], period: int) -> list[float | None]:
     out[period - 1] = sum(values[:period]) / period
     for i in range(period, n):
         out[i] = values[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def _bar_end_ts(bar_ts: str, bar_minutes: int) -> str:
+    """Full timestamp (same date/tz as bar_ts) at which this bucket
+    closes -- the earliest moment its close/EMA value is usable."""
+    hh, mm = int(bar_ts[11:13]), int(bar_ts[14:16])
+    total = hh * 60 + mm + bar_minutes
+    eh, em = divmod(total, 60)
+    return f"{bar_ts[:11]}{eh:02d}:{em:02d}:00{bar_ts[19:]}"
+
+
+def _align_ema_to_1min(all_1min: list[list], bars15: list[list], ema_15: list[float | None]) -> list[float | None]:
+    """For each 1-min candle, the EMA value from the most recently
+    COMPLETED 15-min bucket as of that candle's own timestamp (never
+    the bucket the candle is currently inside)."""
+    effective_from = [_bar_end_ts(b[0], 15) for b in bars15]
+    out: list[float | None] = [None] * len(all_1min)
+    j = -1
+    for idx, row in enumerate(all_1min):
+        ts = row[0]
+        while j + 1 < len(bars15) and effective_from[j + 1] <= ts:
+            j += 1
+        if j >= 0:
+            out[idx] = ema_15[j]
     return out
 
 
@@ -89,12 +131,17 @@ def run(
         )
         all_1min.extend(rows)
     all_1min.sort(key=lambda c: c[0])
-    if len(all_1min) < ema_slow + 2:
+    if len(all_1min) < 2:
         return []
 
-    closes = [c[4] for c in all_1min]
-    ema9 = _ema(closes, ema_fast)
-    ema20 = _ema(closes, ema_slow)
+    bars15 = _resample(all_1min, 15)
+    if len(bars15) < ema_slow + 2:
+        return []
+    closes15 = [b[4] for b in bars15]
+    ema9_15 = _ema(closes15, ema_fast)
+    ema20_15 = _ema(closes15, ema_slow)
+    ema9 = _align_ema_to_1min(all_1min, bars15, ema9_15)
+    ema20 = _align_ema_to_1min(all_1min, bars15, ema20_15)
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
