@@ -25,10 +25,24 @@ and low breakout at once (a wide-range candle), the high breakout is
 checked first -- a simplification, not a claim about true intrabar
 order, which OHLC bars can't resolve.
 
-Exit: the next opposite-direction entry signal (reverse) or forced flat
-at FORCE_FLAT_TIME -- no separate stop-loss or target. One position at
-a time; while in a trade, new sweep patterns still get tracked so the
-next setup is ready the moment the position closes.
+Stop-loss and target (in underlying INDEX points, not option premium --
+the option is just how the trade is realized): the sweep candle's own
+range is the risk unit.
+    LONG:  entry = pattern High, stop = pattern Low,
+           target = entry + 2 * (pattern High - pattern Low)
+    SHORT: entry = pattern Low,  stop = pattern High,
+           target = entry - 2 * (pattern High - pattern Low)
+A fixed 1:2 risk/reward. Checked bar-by-bar against the INDEX bar's
+high/low (not the option's); if a bar's range would touch both stop
+and target, the stop is assumed to trigger first (conservative). The
+actual fill is still the option's own premium at that bar's time, same
+as every other exit here -- the index level only decides *when* to
+exit, not the option's price.
+
+Exit: stop-loss, target, or forced flat at FORCE_FLAT_TIME -- there is
+no more "exit on the next opposite signal": once in a trade, a fresh
+sweep/breakout is tracked (so the next setup is ready) but does not
+close the current position early. One position at a time.
 
 Same decision-time consideration as futures_oi_buildup.py does NOT
 apply here: this trades native 1-minute bars (no resampling into a
@@ -118,7 +132,7 @@ def run(
         atm = oc.round_to_step(c, strike_step)
         expiry = next((e for e in expiries if e >= d), None)
 
-        def _enter(direction_label: str) -> None:
+        def _enter(direction_label: str, pattern_high: float, pattern_low: float) -> None:
             nonlocal position
             if expiry is None:
                 return
@@ -129,10 +143,18 @@ def run(
             bar = _bar_at_or_after(candles, time_str) or _bar_at_or_before(candles, time_str)
             if bar is None:
                 return
+            risk = pattern_high - pattern_low
+            if direction_label == "LONG":
+                stop_level = pattern_low
+                target_level = pattern_high + 2 * risk
+            else:
+                stop_level = pattern_high
+                target_level = pattern_low - 2 * risk
             position = {
                 "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
                 "strike": contract["strike_price"], "expiry": expiry,
                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
+                "stop_level": stop_level, "target_level": target_level,
             }
 
         def _exit(reason: str) -> None:
@@ -157,6 +179,18 @@ def run(
                 _exit("eod")
             continue
 
+        if position is not None:
+            if position["direction"] == "LONG":
+                if l <= position["stop_level"]:
+                    _exit("stop_loss")
+                elif h >= position["target_level"]:
+                    _exit("target")
+            else:
+                if h >= position["stop_level"]:
+                    _exit("stop_loss")
+                elif l <= position["target_level"]:
+                    _exit("target")
+
         e9, e20 = ema9[i], ema20[i]
         swept = any(
             ema_val is not None and ((h > ema_val and c <= ema_val) or (l < ema_val and c >= ema_val))
@@ -168,18 +202,12 @@ def run(
             pattern = {"high": h, "low": l}
             continue
 
-        if pattern is not None:
+        if position is None and pattern is not None:
             if h > pattern["high"]:
-                if position is not None and position["direction"] == "SHORT":
-                    _exit("reverse")
-                if position is None:
-                    _enter("LONG")
+                _enter("LONG", pattern["high"], pattern["low"])
                 pattern = None
             elif l < pattern["low"]:
-                if position is not None and position["direction"] == "LONG":
-                    _exit("reverse")
-                if position is None:
-                    _enter("SHORT")
+                _enter("SHORT", pattern["high"], pattern["low"])
                 pattern = None
 
     if position is not None:
