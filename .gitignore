@@ -3,3 +3,5 @@ __pycache__/
 .live_nifty_state.json
 .live_oi_buildup_state.json
 .live_oi_buildup_state_v2.json
+data/paper_trader_state.json
+data/paper_trades.jsonl
