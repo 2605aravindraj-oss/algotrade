@@ -13,14 +13,20 @@ Signal (daily NIFTY 50 INDEX candles):
     filter: the RSI's own smoothed baseline, the RSI equivalent of a
     fast/slow moving-average crossover, used instead of a fixed level
     like 50.
-    MACD(12,26,9) on daily closes. A "bullish cross" is the specific
-    day the MACD line moves from at-or-below its signal line to above
-    it -- a fresh cross only, not every day the line happens to be
-    above its signal.
+    MACD(12,26,9) on daily closes. By default (require_fresh_cross=True)
+    a "bullish cross" is the specific day the MACD line moves from
+    at-or-below its signal line to above it -- a fresh cross only, not
+    every day the line happens to be above its signal. This is
+    extremely restrictive: over Jan 2025-Sep 2026 (419 trading days)
+    it only fires 16 times, since a crossover is a single-day event.
+    Setting require_fresh_cross=False trades trade frequency for
+    signal strictness -- the condition becomes "MACD line is currently
+    above its signal" (persistent, not just the crossing day), which
+    holds on ~138 of those same 419 days, an ~8.6x higher "run rate".
 
-Entry: on any day where RSI(14) > SMA14(RSI(14)) AND a bullish MACD
-cross happens on THAT SAME DAY, buy the ATM call at that day's close.
-Long only, exactly as specified -- there's no mirrored bearish/PE side
+Entry: on any day where RSI(14) > SMA14(RSI(14)) AND the MACD
+condition above is met, buy the ATM call at that day's close. Long
+only, exactly as specified -- there's no mirrored bearish/PE side
 in this module.
 
 Exit: the very next trading day's close, unconditionally -- a fixed
@@ -78,6 +84,7 @@ def run(
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
+    require_fresh_cross: bool = True,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     daily = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -92,12 +99,22 @@ def run(
 
     bullish_cross = [False] * len(daily)
     for i in range(1, len(daily)):
-        if (
-            macd_line[i - 1] is not None and signal_line[i - 1] is not None
-            and macd_line[i] is not None and signal_line[i] is not None
-            and macd_line[i - 1] <= signal_line[i - 1] and macd_line[i] > signal_line[i]
-        ):
-            bullish_cross[i] = True
+        if macd_line[i] is None or signal_line[i] is None:
+            continue
+        if require_fresh_cross:
+            if (
+                macd_line[i - 1] is not None and signal_line[i - 1] is not None
+                and macd_line[i - 1] <= signal_line[i - 1] and macd_line[i] > signal_line[i]
+            ):
+                bullish_cross[i] = True
+        else:
+            # persistent regime, not just the crossover day itself -- "run
+            # rate" lever: the fresh-cross-only version only fires 16 times
+            # in ~1.7 years since a crossover is a single-day event, while
+            # the persistent condition (macd line simply above signal)
+            # holds on ~8x as many days
+            if macd_line[i] > signal_line[i]:
+                bullish_cross[i] = True
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
