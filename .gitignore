@@ -6,3 +6,4 @@ __pycache__/
 data/paper_trader_state.json
 data/paper_trades.jsonl
 data/paper_trader.log
+data/market_cache.db
