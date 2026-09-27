@@ -24,10 +24,17 @@ Signal (daily NIFTY 50 INDEX candles):
     above its signal" (persistent, not just the crossing day), which
     holds on ~138 of those same 419 days, an ~8.6x higher "run rate".
 
-Entry: on any day where RSI(14) > SMA14(RSI(14)) AND the MACD
+Entry: on any day where RSI(14) > SMA14(RSI(14)) AND the bullish MACD
 condition above is met, buy the ATM call at that day's close. Long
-only, exactly as specified -- there's no mirrored bearish/PE side
-in this module.
+only (the original spec) unless trade_short=True, which adds the
+mirrored bearish side: RSI(14) < SMA14(RSI(14)) AND a bearish MACD
+cross (or, under require_fresh_cross=False, the persistent "MACD line
+below signal") buys the ATM put instead. Bearish crosses are just as
+common as bullish ones (16 vs 16 over Jan 2025-Sep 2026), so this
+roughly doubles trade count WITHOUT touching the fresh-cross filter
+that require_fresh_cross=False showed is actually where the edge
+lives -- a "run rate" lever that adds independent, equally-strict
+opportunities instead of diluting the existing ones.
 
 Exit: the very next trading day's close, unconditionally -- a fixed
 one-day hold, not signal-, stop-, or target-based. Whatever happens to
@@ -85,6 +92,7 @@ def run(
     macd_slow: int = 26,
     macd_signal: int = 9,
     require_fresh_cross: bool = True,
+    trade_short: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     daily = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -98,6 +106,7 @@ def run(
     macd_line, signal_line = compute_macd(closes, macd_fast, macd_slow, macd_signal)
 
     bullish_cross = [False] * len(daily)
+    bearish_cross = [False] * len(daily)
     for i in range(1, len(daily)):
         if macd_line[i] is None or signal_line[i] is None:
             continue
@@ -107,6 +116,11 @@ def run(
                 and macd_line[i - 1] <= signal_line[i - 1] and macd_line[i] > signal_line[i]
             ):
                 bullish_cross[i] = True
+            elif (
+                macd_line[i - 1] is not None and signal_line[i - 1] is not None
+                and macd_line[i - 1] >= signal_line[i - 1] and macd_line[i] < signal_line[i]
+            ):
+                bearish_cross[i] = True
         else:
             # persistent regime, not just the crossover day itself -- "run
             # rate" lever: the fresh-cross-only version only fires 16 times
@@ -115,6 +129,8 @@ def run(
             # holds on ~8x as many days
             if macd_line[i] > signal_line[i]:
                 bullish_cross[i] = True
+            elif macd_line[i] < signal_line[i]:
+                bearish_cross[i] = True
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
@@ -157,24 +173,31 @@ def run(
             bar = oc.nearest_bar(candles, pick="last")
             exit_time, exit_price = bar if bar else (f"{d}T15:30:00+05:30", position["entry_price"])
             trades.append(OptionTrade(
-                date=position["entry_date"], direction="LONG", expiry=position["expiry"],
+                date=position["entry_date"], direction=position["direction"], expiry=position["expiry"],
                 strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
                 exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason="next_day_eod",
             ))
             position = None
 
         if position is None and i + 1 < len(daily) and rsi[i] is not None and rsi_sma[i] is not None:
+            direction_label = None
             if rsi[i] > rsi_sma[i] and bullish_cross[i]:
+                direction_label = "LONG"
+            elif trade_short and rsi[i] < rsi_sma[i] and bearish_cross[i]:
+                direction_label = "SHORT"
+
+            if direction_label is not None:
                 expiry = next((e for e in expiries if e > d), None)
                 if expiry is not None:
+                    opt_type = "CE" if direction_label == "LONG" else "PE"
                     atm = oc.round_to_step(c, strike_step)
-                    contract, candles = _atm_option_candles(atm, "CE", d, expiry)
+                    contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
                     if contract is not None and candles:
                         bar = oc.nearest_bar(candles, pick="last")
                         if bar is not None:
                             entry_time, entry_price = bar
                             position = {
-                                "entry_date": d, "entry_time": entry_time, "entry_price": entry_price,
+                                "direction": direction_label, "entry_date": d, "entry_time": entry_time, "entry_price": entry_price,
                                 "strike": contract["strike_price"], "expiry": expiry,
                                 "lot_size": contract["lot_size"], "instrument_key": contract["instrument_key"],
                                 "exit_date": daily[i + 1]["date"],
