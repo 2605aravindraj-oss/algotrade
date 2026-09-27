@@ -30,11 +30,27 @@ fills at the NEXT bar's close, both decision-time-correct (bucket
 start + candle_minutes), same fill convention as every other intraday
 module in this codebase.
 
-Intraday only: forced flat at FORCE_FLAT_TIME (no new entries once
-reached; an already-open position still exits normally since its exit
-bar was fixed at entry time), never carries a position across a day
-boundary, and an entry isn't taken on a day's last bar -- there'd be
-no same-day next bar to exit on.
+Optional ride_trend=True changes ONLY the exit: instead of a fixed
+one-bar hold, "ride the MACD trend" -- stay in for as long as the
+MACD's directional state (which line is on top) hasn't flipped, and
+exit the instant the OPPOSITE crossover fires (bearish cross closes a
+LONG, bullish cross closes a SHORT), regardless of what RSI is doing
+by then. Since that opposite crossover is also this module's own
+entry trigger for the other direction, a trend reversal naturally
+flips the position (close LONG, open SHORT) on the same bar when RSI
+also agrees -- the same stop-and-reverse behavior this codebase's
+Supertrend modules use, arrived at here without any special-casing.
+Still no stop-loss or target either way -- the position is only ever
+closed by the trend itself reversing or the day ending.
+
+Intraday only: forced flat at FORCE_FLAT_TIME. In the default
+(fixed one-bar hold) mode, positions never span the boundary anyway
+so this only blocks new entries; in ride_trend mode it's a real
+forced exit, since a ridden trend can span many bars and would
+otherwise carry overnight. An entry isn't taken in the default mode
+on a day's last bar -- there'd be no same-day next bar to exit on
+(ride_trend mode has no such restriction, since FORCE_FLAT_TIME
+itself is always a valid exit).
 """
 from __future__ import annotations
 
@@ -60,6 +76,7 @@ def run(
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
+    ride_trend: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -134,7 +151,8 @@ def run(
         _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + candle_minutes, 60)
         decision_time_str = f"{_dh:02d}:{_dm:02d}"
 
-        if position is not None and position["exit_bar_index"] == i:
+        def _close(reason: str) -> None:
+            nonlocal position
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
             bar = _fill(candles, decision_time_str) if candles else None
             exit_price = bar[4] if bar else position["entry_price"]
@@ -142,14 +160,26 @@ def run(
             trades.append(OptionTrade(
                 date=position["date"], direction=position["direction"], expiry=position["expiry"],
                 strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason="next_bar_close",
+                exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason=reason,
             ))
             position = None
 
-        if time_str >= FORCE_FLAT_TIME:
-            continue
+        if ride_trend:
+            if time_str >= FORCE_FLAT_TIME:
+                if position is not None:
+                    _close("eod")
+                continue
+            if position is not None:
+                if (position["direction"] == "LONG" and bearish_cross[i]) or (position["direction"] == "SHORT" and bullish_cross[i]):
+                    _close("trend_reverse")
+        else:
+            if position is not None and position["exit_bar_index"] == i:
+                _close("next_bar_close")
+            if time_str >= FORCE_FLAT_TIME:
+                continue
 
-        if position is None and expiry is not None and i + 1 < len(bars) and bars[i + 1][0][:10] == d:
+        can_enter = ride_trend or (i + 1 < len(bars) and bars[i + 1][0][:10] == d)
+        if position is None and expiry is not None and can_enter:
             direction_label = None
             if rsi[i] is not None and rsi_sma[i] is not None:
                 if rsi[i] > rsi_sma[i] and bullish_cross[i]:
