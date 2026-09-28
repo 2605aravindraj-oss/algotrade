@@ -37,19 +37,21 @@ candles, used unchanged for all of day D+1 (a "fixed", not
     Value Area = POC's bin plus the adjacent bins added one at a time,
     always taking whichever side (above or below the current range)
     has more volume, until the included bins hold >= value_area_pct
-    (default 70%, the standard convention) of the day's total volume.
-    VAH/VAL = the top/bottom of that included range.
+    (default 80%, RETUNED from an initial guess of the standard 70% --
+    see TUNING below) of the day's total volume. VAH/VAL = the top/
+    bottom of that included range.
 
 STAGE 2 -- trading day D+1, watched on candle_minutes (default 5)
 futures candles, mode-specific:
 
     strategy_mode="poc_magnet": whenever price is more than
-        poc_distance_points (default 60.0 -- roughly a day's typical
-        half value-area width, an assumption) away from POC, bet on
-        reversion back toward it: price > POC + distance -> SHORT
-        (buy ATM PE); price < POC - distance -> LONG (buy ATM CE).
-        Stop = entry +/- sl_points further away from POC (structural
-        drift-continuation risk); target = POC itself.
+        poc_distance_points (default 50.0, RETUNED from an initial
+        guess of 60.0) away from POC, bet on reversion back toward it:
+        price > POC + distance -> SHORT (buy ATM PE); price < POC -
+        distance -> LONG (buy ATM CE). Stop = entry +/- sl_points
+        (default 30.0, RETUNED from an initial guess of 40.0) further
+        away from POC (structural drift-continuation risk); target =
+        POC itself.
 
     strategy_mode="vah_val_reversion": a candle wicks beyond VAH/VAL
         but CLOSES back inside it (the value area rejects the poke) --
@@ -57,6 +59,27 @@ futures candles, mode-specific:
         modules. High > VAH and Close <= VAH -> SHORT (buy PE); Low <
         VAL and Close >= VAL -> LONG (buy CE). Stop = the signal
         candle's own opposite extreme (structural); target = POC.
+
+TUNING (2026-07-01 to 2026-09-25, the only window this module has
+data for -- see SCOPE LIMIT, so treat this as within-window tuning
+only, NOT cross-window validated like this session's other tunings):
+    poc_magnet: swept poc_distance_points (20-120) and sl_points
+        (15-100) both independently and as a 2D grid around the best
+        individual points -- EVERY cell tested in the grid (dist
+        40-60 x sl 20-80) was net positive (+Rs 9,900 to +Rs 23,678),
+        a genuinely broad, no-bad-cells plateau, not a spike. Picked
+        dist=50/sl=30 (+Rs 21,415) as a strong, centrally-located point
+        rather than the grid's exact peak (dist=50/sl=80, +Rs 23,678)
+        to avoid sitting on an edge.
+    vah_val_reversion: swept price_bin_size (5-30, all net positive,
+        +Rs 2,702 to +Rs 9,478) and value_area_pct (0.55-0.95). The
+        pct sweep is a genuine plateau peaking at 0.80-0.85 (+Rs
+        ~15,400 both) -- NOT a monotonic "higher is always better"
+        trend as it first appeared from 0.55-0.85 alone: extending
+        past 0.85 (0.88-0.95) drops off and gets noisy (+Rs 1,265 to
+        +Rs 5,405), confirming 0.80-0.85 is a real peak, not an edge
+        effect from the value area approaching the whole day's range.
+        Picked value_area_pct=0.80 (bin_size=10 combo: +Rs 15,443).
 
     strategy_mode="breakout": a candle CLOSES decisively outside the
         value area (not just a wick) -> trade continuation, betting
@@ -146,11 +169,11 @@ def run(
     strike_step: int = 50,
     candle_minutes: int = 5,
     price_bin_size: float = 10.0,
-    value_area_pct: float = 0.70,
+    value_area_pct: float = 0.80,
     strategy_mode: str = "poc_magnet",
-    poc_distance_points: float = 60.0,
+    poc_distance_points: float = 50.0,
     target_multiple: float = 1.0,
-    sl_points: float = 40.0,
+    sl_points: float = 30.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     if strategy_mode not in ("poc_magnet", "vah_val_reversion", "breakout"):
