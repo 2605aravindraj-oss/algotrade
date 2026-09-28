@@ -145,6 +145,7 @@ def run(
     target_points: float | None = 26.0,
     exit_mode: str = "sl_target",
     one_trade_per_day: bool = False,
+    min_diff_points: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     if exit_mode not in ("sl_target", "avg_reverse"):
@@ -200,7 +201,7 @@ def run(
             diff = abs(ce_close - pe_close)
             if best is None or diff < best[0]:
                 best = (diff, strike, (ce_close + pe_close) / 2)
-        reference[d] = {"strike": best[1], "avg_price": best[2], "expiry": expiry} if best else None
+        reference[d] = {"strike": best[1], "avg_price": best[2], "diff": best[0], "expiry": expiry} if best else None
 
     # -- STAGE 2: trade day D+1 off day D's reference --
     trades: list[OptionTrade] = []
@@ -208,6 +209,8 @@ def run(
         d = trading_days[i]["date"]
         ref = reference[trading_days[i - 1]["date"]]
         if ref is None or ref["expiry"] < d:
+            continue
+        if min_diff_points is not None and ref["diff"] < min_diff_points:
             continue
         lookup = _lookup(ref["expiry"])
         ce_contract = lookup.get((ref["strike"], "CE"))
