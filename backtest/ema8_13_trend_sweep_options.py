@@ -17,9 +17,17 @@ STAGE 1 -- crossover: EMA8 crosses EMA13 (continuous across the whole
 STAGE 2 -- "trend happened": since the regime started, track the
     running extreme (highest High for an up regime, lowest Low for a
     down regime). Confirmed once that extreme has moved at least
-    trend_min_points (default 15 index points) beyond the crossover
-    bar's own Close -- a floor meant to rule out noise, not a claim
-    about what a "real" trend requires.
+    trend_min_points beyond the crossover bar's own Close -- a floor
+    meant to rule out noise, not a claim about what a "real" trend
+    requires. Default 26 (retuned from an initial guess of 15 after a
+    parameter sweep on 2026-05-16 to 2026-09-08: net P&L is negative
+    or flat everywhere below ~20 and above ~32, but forms a real
+    plateau from about 20-30 -- 22, 24, 25, 26, and 30 are all
+    net-positive or near it, not an isolated spike -- with 26 the peak
+    (135 trades, 38.5% win rate, net +Rs 5,456, the best result found
+    across this whole session). target_multiple=2.0 and
+    consolidation_bars=3 were re-checked at this trend_min_points and
+    are themselves still the local optimum in their own dimensions.
 
 STAGE 3 -- "consolidation": once trend is confirmed, consolidation is
     read as the trend PAUSING -- consolidation_bars (default 3)
@@ -88,7 +96,7 @@ def run(
     candle_minutes: int = 5,
     ema_fast: int = 8,
     ema_slow: int = 13,
-    trend_min_points: float = 15.0,
+    trend_min_points: float = 26.0,
     consolidation_bars: int = 3,
     target_multiple: float = 2.0,
     access_token: str | None = None,
