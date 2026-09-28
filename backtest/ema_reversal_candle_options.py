@@ -34,6 +34,13 @@ Exit mode (exit_mode parameter):
         back through EMA9 (the faster/nearer line) against the
         position: below it for a LONG, above it for a SHORT. The
         structural stop still applies throughout either way.
+    "target_then_trail": reaching the 1:2 target does NOT close the
+        trade -- it flips the position into trailing mode, where the
+        exit becomes a later day's Close crossing back through EMA20
+        (the SLOWER line, not EMA9) against the position. Before the
+        target is first reached, the structural candle-low/high stop
+        still applies exactly as in "target" mode; once trailing,
+        EMA20 is the only exit criterion.
 
 POSITIONAL, not intraday -- a signal can take anywhere from a day to
 several weeks to resolve, unlike this codebase's fixed-single-day-hold
@@ -76,8 +83,8 @@ def run(
     target_multiple: float = 2.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
-    if exit_mode not in ("target", "ride"):
-        raise ValueError('exit_mode must be "target" or "ride"')
+    if exit_mode not in ("target", "ride", "target_then_trail"):
+        raise ValueError('exit_mode must be "target", "ride", or "target_then_trail"')
 
     daily = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     daily.sort(key=lambda row: row["date"])
@@ -147,7 +154,7 @@ def run(
                     _exit("stop_loss", d)
                 elif hit_target:
                     _exit("target", d)
-            else:
+            elif exit_mode == "ride":
                 hit_stop = (l <= position["stop_level"]) if is_long else (h >= position["stop_level"])
                 if hit_stop:
                     _exit("stop_loss", d)
@@ -155,6 +162,19 @@ def run(
                     if is_long and c < ema9[i]:
                         _exit("trend_reverse", d)
                     elif not is_long and c > ema9[i]:
+                        _exit("trend_reverse", d)
+            else:  # target_then_trail
+                if not position["trailing"]:
+                    hit_stop = (l <= position["stop_level"]) if is_long else (h >= position["stop_level"])
+                    hit_target = (h >= position["target_level"]) if is_long else (l <= position["target_level"])
+                    if hit_stop:
+                        _exit("stop_loss", d)
+                    elif hit_target:
+                        position["trailing"] = True
+                elif ema20[i] is not None:
+                    if is_long and c < ema20[i]:
+                        _exit("trend_reverse", d)
+                    elif not is_long and c > ema20[i]:
                         _exit("trend_reverse", d)
 
         if position is None and ema9[i] is not None and ema20[i] is not None:
@@ -185,7 +205,7 @@ def run(
                                     "direction": direction_label, "entry_date": d, "entry_time": entry_time,
                                     "entry_price": entry_price, "strike": contract["strike_price"], "expiry": expiry,
                                     "lot_size": contract["lot_size"], "instrument_key": contract["instrument_key"],
-                                    "stop_level": stop_level, "target_level": target_level,
+                                    "stop_level": stop_level, "target_level": target_level, "trailing": False,
                                 }
 
     if position is not None:
