@@ -31,14 +31,12 @@ STAGE 4 -- "sweep happened at EMA": once consolidating, watch every
     that pokes through EMA8 but closes back on the trend's side:
         UP regime:   candle Low < EMA8 and Close >= EMA8
         DOWN regime: candle High > EMA8 and Close <= EMA8
-    That candle's own High/Low becomes the breakout trigger level (a
-    fresh sweep replaces any earlier still-pending one), same
-    sweep-then-breakout structure as ema_sweep_breakout_options.py.
 
-ENTRY: the first later candle whose High breaks above the sweep
-candle's High (up regime, buy ATM CE) or Low breaks below the sweep
-candle's Low (down regime, buy ATM PE) -- i.e. resuming the original
-trend after the pullback, not a new reversal.
+ENTRY: at the sweep candle's own close -- no separate breakout
+confirmation candle (an earlier version of this module waited for a
+later candle to break the sweep candle's own High/Low before entering;
+this one enters immediately, since the sweep candle's own reclaim of
+EMA8 IS the confirmation).
 
 STOP-LOSS AND TARGET are structural INDEX levels (a genuine chart
 stop, not option-premium points), since none were specified for this
@@ -135,7 +133,6 @@ def run(
 
     trades: list[OptionTrade] = []
     position = None    # dict: direction, entry_time, entry_price, strike, expiry, lot_size, opt_type, date, stop_level, target_level
-    pattern = None      # dict: direction, high, low
     current_day: str | None = None
     regime = None       # "up" / "down" / None
     regime_start_close = None
@@ -153,7 +150,6 @@ def run(
         if d != current_day:
             current_day = d
             position = None
-            pattern = None
             regime = None
             regime_start_close = extreme_val = extreme_idx = None
             trend_confirmed = consolidating = False
@@ -199,19 +195,15 @@ def run(
                 regime_start_close = c
                 extreme_val, extreme_idx = h, i
                 trend_confirmed = consolidating = False
-                pattern = None
             elif prev_ema8 >= prev_ema13 and ema8[i] < ema13[i]:
                 regime = "down"
                 regime_start_close = c
                 extreme_val, extreme_idx = l, i
                 trend_confirmed = consolidating = False
-                pattern = None
             elif regime == "up" and ema8[i] < ema13[i]:
                 regime = None  # regime broke without a fresh opposite cross this bar
-                pattern = None
             elif regime == "down" and ema8[i] > ema13[i]:
                 regime = None
-                pattern = None
 
         # -- trend + consolidation tracking --
         if regime == "up":
@@ -229,29 +221,23 @@ def run(
             if trend_confirmed and (i - extreme_idx) >= consolidation_bars:
                 consolidating = True
 
-        # -- sweep detection (only once consolidating) --
-        if position is None and consolidating and ema8[i] is not None:
+        # -- sweep detection + immediate entry, at the sweep candle's own
+        # close (no separate breakout confirmation candle) --
+        if position is None and consolidating and ema8[i] is not None and expiry is not None:
+            direction_label = None
             if regime == "up" and l < ema8[i] and c >= ema8[i]:
-                pattern = {"direction": "LONG", "high": h, "low": l}
+                direction_label = "LONG"
             elif regime == "down" and h > ema8[i] and c <= ema8[i]:
-                pattern = {"direction": "SHORT", "high": h, "low": l}
+                direction_label = "SHORT"
 
-        # -- breakout / entry --
-        if position is None and pattern is not None and expiry is not None:
-            triggered = False
-            if pattern["direction"] == "LONG" and h > pattern["high"]:
-                triggered = True
-            elif pattern["direction"] == "SHORT" and l < pattern["low"]:
-                triggered = True
-            if triggered:
-                direction_label = pattern["direction"]
-                risk = pattern["high"] - pattern["low"]
+            if direction_label is not None:
+                risk = h - l
                 if direction_label == "LONG":
-                    stop_level = pattern["low"]
-                    target_level = pattern["high"] + target_multiple * risk
+                    stop_level = l
+                    target_level = h + target_multiple * risk
                 else:
-                    stop_level = pattern["high"]
-                    target_level = pattern["low"] - target_multiple * risk
+                    stop_level = h
+                    target_level = l - target_multiple * risk
                 opt_type = "CE" if direction_label == "LONG" else "PE"
                 contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
                 if contract is not None and candles:
@@ -263,7 +249,6 @@ def run(
                             "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
                             "stop_level": stop_level, "target_level": target_level,
                         }
-                pattern = None
 
         prev_ema8, prev_ema13 = ema8[i], ema13[i]
 
