@@ -59,6 +59,17 @@ expiry has already passed by the trading day (D was itself the expiry
 date), that contract is dead and no trade is taken (no data to trigger
 on).
 
+exit_mode="avg_reverse" is an alternative to the sl_points/target_points
+exit above: instead of a premium-points stop/target, close the leg the
+first time its OWN close falls back below avg_price -- the mirror of
+the entry trigger, on the same reference level, applied identically to
+both legs (CE exits below avg_price same as PE does; there's no
+separate "vice versa" formula, the rule is symmetric by construction
+since both legs only ever enter on a close ABOVE avg_price). No
+stop-loss and no profit target in this mode -- sl_points/target_points
+are ignored -- so a leg can only exit via this reversal or the
+forced-flat EOD fallback if it never reverses.
+
 One entry per leg per day; a leg already filled that day is not
 re-entered even if its price dips back below avg_price and re-crosses.
 Everything resets at the next day boundary (a fresh reference is
@@ -84,8 +95,11 @@ def run(
     strike_search_range: int = 2,
     sl_points: float | None = 14.0,
     target_points: float | None = 28.0,
+    exit_mode: str = "sl_target",
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    if exit_mode not in ("sl_target", "avg_reverse"):
+        raise ValueError('exit_mode must be "sl_target" or "avg_reverse"')
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda row: row["date"])
     if len(trading_days) < 2:
@@ -175,22 +189,31 @@ def run(
                         position = None
                     break
                 if position is not None:
-                    hit_stop = sl_points is not None and l <= position["entry_price"] - sl_points
-                    hit_target = target_points is not None and h >= position["entry_price"] + target_points
-                    if hit_stop:
-                        trades.append(OptionTrade(
-                            date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                            entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                            exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="stop_loss",
-                        ))
-                        position = None
-                    elif hit_target:
-                        trades.append(OptionTrade(
-                            date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                            entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                            exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="target",
-                        ))
-                        position = None
+                    if exit_mode == "avg_reverse":
+                        if c < avg_price:
+                            trades.append(OptionTrade(
+                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="avg_reverse",
+                            ))
+                            position = None
+                    else:
+                        hit_stop = sl_points is not None and l <= position["entry_price"] - sl_points
+                        hit_target = target_points is not None and h >= position["entry_price"] + target_points
+                        if hit_stop:
+                            trades.append(OptionTrade(
+                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="stop_loss",
+                            ))
+                            position = None
+                        elif hit_target:
+                            trades.append(OptionTrade(
+                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="target",
+                            ))
+                            position = None
                 if position is None and not already_traded_today and c > avg_price:
                     position = {"entry_time": ts, "entry_price": c}
                     already_traded_today = True
