@@ -5,11 +5,17 @@ timeframe was given at the time).
 
 Context + trigger, both on the SAME 5-minute candle:
     LONG (buy ATM CE):  EMA9 < EMA20 (downtrend context) AND this
-                         candle's Open is below BOTH EMAs AND its
-                         Close is above BOTH EMAs.
-    SHORT (buy ATM PE): EMA9 > EMA20 (uptrend context) AND Open above
+                         candle's Low is below BOTH EMAs (a wick
+                         through both, not necessarily the Open) AND
+                         its Close is above BOTH EMAs.
+    SHORT (buy ATM PE): EMA9 > EMA20 (uptrend context) AND High above
                          BOTH EMAs AND Close below BOTH EMAs -- the
-                         mirror.
+                         mirror. Loosened from an earlier version that
+                         required the Open (not just the Low) below
+                         both EMAs -- since a candle's Low is always
+                         <= its Open, this admits candles that opened
+                         ABOVE the EMAs, wicked down through both
+                         intra-bar, and still reclaimed by the close.
 EMA9/EMA20 computed on these same 5-minute bars, continuous across the
 whole date range (needs warm-up, not reset daily) -- no multi-timeframe
 alignment is needed since signal and EMA share one timeframe.
@@ -171,9 +177,9 @@ def run(
 
         if position is None and ema9[i] is not None and ema20[i] is not None and expiry is not None:
             direction_label = None
-            if ema9[i] < ema20[i] and o < ema9[i] and o < ema20[i] and c > ema9[i] and c > ema20[i]:
+            if ema9[i] < ema20[i] and l < ema9[i] and l < ema20[i] and c > ema9[i] and c > ema20[i]:
                 direction_label = "LONG"
-            elif ema9[i] > ema20[i] and o > ema9[i] and o > ema20[i] and c < ema9[i] and c < ema20[i]:
+            elif ema9[i] > ema20[i] and h > ema9[i] and h > ema20[i] and c < ema9[i] and c < ema20[i]:
                 direction_label = "SHORT"
 
             if direction_label is not None:
