@@ -64,8 +64,34 @@ convention as every other intraday module here.
 
 Exit: stop-loss, target, or forced flat at FORCE_FLAT_TIME. One
 position at a time; never carries across a day boundary.
+
+REGIME FILTER (daily_trend_filter, off by default): an out-of-sample
+check on a different window (2025-10-01 to 2026-01-15) found the
+trend_min_points=26 tuning above -- a genuine within-window plateau,
+not a spike -- still deeply negative there (net -Rs 40k to -48k across
+the whole 15-35 range), meaning the pattern's edge doesn't transfer
+across time periods on its own. daily_trend_filter is an attempt at a
+fix: gate entries on a higher-timeframe trend context, so a 5-min
+continuation pattern is only traded when the broader daily trend
+agrees with it, on the theory that many of the losing trades are the
+pattern firing against the grain of the larger market.
+
+Context: daily EMA(daily_trend_ema_period, default 20) on NIFTY daily
+closes, fetched with an extra buffer of calendar days before from_date
+for warm-up. For each session, the daily trend is read from the
+PREVIOUS completed trading day's close vs. that same prior day's own
+daily EMA value -- "up" if prior close > prior daily EMA, "down" if
+below, None if not yet warmed up. This is decision-time-correct: the
+current day's own daily bar is still forming throughout the whole
+intraday session, so it can never be used for that same day's filter.
+Gate: a LONG entry (regime=="up") additionally requires daily_trend ==
+"up"; a SHORT entry (regime=="down") requires daily_trend == "down".
+When daily_trend_filter is False (the default), nothing changes from
+the ungated behavior above.
 """
 from __future__ import annotations
+
+from datetime import datetime, timedelta
 
 from data_sources import cache, upstox_client
 from backtest import options_common as oc
@@ -99,9 +125,30 @@ def run(
     trend_min_points: float = 26.0,
     consolidation_bars: int = 3,
     target_multiple: float = 2.0,
+    daily_trend_filter: bool = False,
+    daily_trend_ema_period: int = 20,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
+
+    daily_trend_by_date: dict[str, str | None] = {}
+    if daily_trend_filter:
+        warmup_from = (datetime.strptime(from_date, "%Y-%m-%d") - timedelta(days=daily_trend_ema_period * 4)).strftime("%Y-%m-%d")
+        daily_rows = upstox_client.get_daily_history(underlying_key, warmup_from, to_date)
+        daily_rows.sort(key=lambda row: row["date"])
+        daily_closes = [row["close"] for row in daily_rows]
+        daily_ema = _ema(daily_closes, daily_trend_ema_period)
+        # index i's trend value applies to the NEXT trading day (decision-time
+        # correct -- day i's own close/EMA is only known after day i closes).
+        for idx in range(len(daily_rows) - 1):
+            next_date = daily_rows[idx + 1]["date"]
+            if daily_ema[idx] is None:
+                daily_trend_by_date[next_date] = None
+            elif daily_closes[idx] > daily_ema[idx]:
+                daily_trend_by_date[next_date] = "up"
+            else:
+                daily_trend_by_date[next_date] = "down"
+
     all_1min: list[list] = []
     for day in trading_days:
         rows = sorted(
@@ -251,6 +298,14 @@ def run(
                 triggered = True
             elif pattern["direction"] == "SHORT" and l < pattern["low"]:
                 triggered = True
+            if triggered and daily_trend_filter:
+                today_trend = daily_trend_by_date.get(d)
+                if pattern["direction"] == "LONG" and today_trend != "up":
+                    triggered = False
+                    pattern = None  # breakout happened but regime disagreed; don't re-attempt
+                elif pattern["direction"] == "SHORT" and today_trend != "down":
+                    triggered = False
+                    pattern = None
             if triggered:
                 direction_label = pattern["direction"]
                 risk = pattern["high"] - pattern["low"]
