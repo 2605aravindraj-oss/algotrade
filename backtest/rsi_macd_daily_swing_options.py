@@ -36,9 +36,17 @@ that require_fresh_cross=False showed is actually where the edge
 lives -- a "run rate" lever that adds independent, equally-strict
 opportunities instead of diluting the existing ones.
 
-Exit: the very next trading day's close, unconditionally -- a fixed
-one-day hold, not signal-, stop-, or target-based. Whatever happens to
-the option's price in between doesn't matter; it's held regardless.
+Exit: the very next trading day's close, unconditionally, UNLESS
+sl_points and/or target_points are set (both None by default -- the
+original spec). When set, the exit day's own 1-minute option candles
+are scanned in order from market open; the first bar whose range
+touches entry_price - sl_points (stop) or entry_price + target_points
+(target) closes the position right there, stop checked first if a
+single bar would touch both (conservative, same convention as every
+other module here). If neither is ever touched, it still falls back
+to that day's close, exactly as the unconditional version does -- SL/
+target only ever cut the hold SHORT, they never extend it past the
+one-day limit.
 
 The option contract is picked to expire STRICTLY AFTER the entry date
 (not on or after it, like every other module in this codebase), since
@@ -93,6 +101,8 @@ def run(
     macd_signal: int = 9,
     require_fresh_cross: bool = True,
     trade_short: bool = False,
+    sl_points: float | None = None,
+    target_points: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     daily = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -169,13 +179,38 @@ def run(
         c = day["close"]
 
         if position is not None and position["exit_date"] == d:
-            candles = _safe_day_candles(position["instrument_key"], d)
-            bar = oc.nearest_bar(candles, pick="last")
-            exit_time, exit_price = bar if bar else (f"{d}T15:30:00+05:30", position["entry_price"])
+            candles = sorted(_safe_day_candles(position["instrument_key"], d), key=lambda c: c[0])
+            exit_time = exit_price = exit_reason = None
+
+            if sl_points is not None or target_points is not None:
+                # Same formula regardless of direction: LONG (bought CE)
+                # and SHORT (bought PE) are both bought-premium positions,
+                # so "profit" always means the premium itself rising --
+                # matches ema_sweep_breakout_options.py's convention.
+                entry_price = position["entry_price"]
+                stop_level = entry_price - sl_points if sl_points is not None else None
+                target_level = entry_price + target_points if target_points is not None else None
+
+                for bar in candles:
+                    ts, o, h, l, cl, v, oi = bar
+                    hit_stop = stop_level is not None and l <= stop_level
+                    hit_target = target_level is not None and h >= target_level
+                    if hit_stop:
+                        exit_time, exit_price, exit_reason = ts, cl, "stop_loss"
+                        break
+                    if hit_target:
+                        exit_time, exit_price, exit_reason = ts, cl, "target"
+                        break
+
+            if exit_time is None:
+                bar = oc.nearest_bar(candles, pick="last")
+                exit_time, exit_price = bar if bar else (f"{d}T15:30:00+05:30", position["entry_price"])
+                exit_reason = "next_day_eod"
+
             trades.append(OptionTrade(
                 date=position["entry_date"], direction=position["direction"], expiry=position["expiry"],
                 strike=position["strike"], entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason="next_day_eod",
+                exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"], exit_reason=exit_reason,
             ))
             position = None
 
