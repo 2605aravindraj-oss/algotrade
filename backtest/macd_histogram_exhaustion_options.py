@@ -43,18 +43,39 @@ ENTRY: "at that candle close, buy/sell options -- scalp some points
     CE (a reversal-up bet), bullish exhaustion buys ATM PE (a
     reversal-down bet).
 
-EXIT -- "scalp some points with sl": no point values were given, so
-    this defaults to a small premium-points scalp, same convention as
-    this codebase's other premium-SL/target modules (e.g.
-    ema_sweep_breakout_options.py): sl_points=8.0, target_points=10.0
-    -- an explicit assumption, not derived from the request, chosen
-    smaller than this codebase's swing-style SL/targets (10-28) to
-    match "scalp." Checked against each later candle's index high/low,
-    stop checked first if a single bar would touch both (conservative);
-    fill is the option's own premium at that bar's time --
+EXIT -- exit_mode parameter:
+    "scalp" (default): "scalp some points with sl" -- no point values
+        were given, so this defaults to a small premium-points scalp,
+        same convention as this codebase's other premium-SL/target
+        modules (e.g. ema_sweep_breakout_options.py): sl_points=8.0,
+        target_points=10.0 -- an explicit assumption, not derived from
+        the request, chosen smaller than this codebase's swing-style
+        SL/targets (10-28) to match "scalp." Checked against each
+        later candle's index high/low, stop checked first if a single
+        bar would touch both (conservative). Forced flat at
+        FORCE_FLAT_TIME if neither hits first.
+    "trend_ride": "stop loss for buy side, when candle close below
+        entry 5 min candle low; target is ride the trend until
+        reversal" -- a structural INDEX stop (the entry/signal
+        candle's own Low for a LONG, High for a SHORT), checked
+        against each LATER candle's own CLOSE (not high/low -- the
+        request says "candle close", read literally as a close-through
+        breach, not an intrabar wick touch). No fixed target: "ride the
+        trend" holds the position until "reversal" -- read as the
+        SAME histogram zero-cross event this strategy's own entry
+        logic already watches for, now checked against the position:
+        a LONG (bought expecting the bearish histogram to recover)
+        exits the first time histogram crosses back from positive to
+        negative (prev bar's histogram > 0, this bar's < 0) -- the
+        recovery itself rolling back over. A SHORT mirrors: exits on
+        histogram crossing back from negative to positive. If the
+        histogram never completes that positive (LONG) / negative
+        (SHORT) leg at all before EOD, there is no trend_reverse event
+        to fire, and the position is simply forced flat at
+        FORCE_FLAT_TIME (or stopped out first).
+    Either mode fills at the deciding candle's own close --
     decision-time-correct (bucket start + candle_minutes), same
-    convention as every other intraday module here. Forced flat at
-    FORCE_FLAT_TIME if neither hits first.
+    convention as every other intraday module here.
 
 One position at a time; a fresh signal while already in a trade is
 skipped. Everything (regime, extreme tracking, strong/pending state)
@@ -84,10 +105,13 @@ def run(
     macd_signal: int = 9,
     min_histogram_points: float = 6.0,
     decel_bars: int = 1,
+    exit_mode: str = "scalp",
     sl_points: float = 8.0,
     target_points: float = 10.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    if exit_mode not in ("scalp", "trend_ride"):
+        raise ValueError('exit_mode must be "scalp" or "trend_ride"')
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     all_1min: list[list] = []
     for day in trading_days:
@@ -173,37 +197,49 @@ def run(
             ))
             position = None
 
+        hi = hist[i]
+
         if time_str >= FORCE_FLAT_TIME:
             if position is not None:
                 _close("eod")
-            prev_hist = hist[i]
+            prev_hist = hi
             continue
+
+        crossed_bearish = hi is not None and prev_hist is not None and prev_hist >= 0 and hi < 0
+        crossed_bullish = hi is not None and prev_hist is not None and prev_hist <= 0 and hi > 0
 
         if position is not None:
             is_long = position["direction"] == "LONG"
-            hit_stop = (l <= position["stop_level"]) if is_long else (h >= position["stop_level"])
-            hit_target = (h >= position["target_level"]) if is_long else (l <= position["target_level"])
-            if hit_stop:
-                _close("stop_loss")
-            elif hit_target:
-                _close("target")
+            if exit_mode == "trend_ride":
+                hit_stop = (c < position["stop_level"]) if is_long else (c > position["stop_level"])
+                if hit_stop:
+                    _close("stop_loss")
+                elif is_long and crossed_bearish:
+                    _close("trend_reverse")
+                elif not is_long and crossed_bullish:
+                    _close("trend_reverse")
+            else:
+                hit_stop = (l <= position["stop_level"]) if is_long else (h >= position["stop_level"])
+                hit_target = (h >= position["target_level"]) if is_long else (l <= position["target_level"])
+                if hit_stop:
+                    _close("stop_loss")
+                elif hit_target:
+                    _close("target")
 
-        hi = hist[i]
         if hi is not None:
             # -- regime detection (fresh zero-cross starts/resets tracking) --
-            if prev_hist is not None:
-                if prev_hist >= 0 and hi < 0:
-                    regime, extreme_hist, strong_confirmed, decel_count = "bearish", hi, False, 0
-                elif prev_hist <= 0 and hi > 0:
-                    regime, extreme_hist, strong_confirmed, decel_count = "bullish", hi, False, 0
-                elif regime == "bearish" and hi >= 0:
-                    regime = extreme_hist = None
-                    strong_confirmed = False
-                    decel_count = 0
-                elif regime == "bullish" and hi <= 0:
-                    regime = extreme_hist = None
-                    strong_confirmed = False
-                    decel_count = 0
+            if crossed_bearish:
+                regime, extreme_hist, strong_confirmed, decel_count = "bearish", hi, False, 0
+            elif crossed_bullish:
+                regime, extreme_hist, strong_confirmed, decel_count = "bullish", hi, False, 0
+            elif regime == "bearish" and hi >= 0:
+                regime = extreme_hist = None
+                strong_confirmed = False
+                decel_count = 0
+            elif regime == "bullish" and hi <= 0:
+                regime = extreme_hist = None
+                strong_confirmed = False
+                decel_count = 0
 
             # -- extreme tracking + strong confirmation + consecutive-deceleration count --
             if regime == "bearish":
@@ -241,8 +277,12 @@ def run(
                         bar = _fill(candles, decision_time_str)
                         if bar is not None:
                             entry_price = bar[4]
-                            stop_level = entry_price - sl_points
-                            target_level = entry_price + target_points
+                            if exit_mode == "trend_ride":
+                                stop_level = l if direction_label == "LONG" else h
+                                target_level = None
+                            else:
+                                stop_level = entry_price - sl_points
+                                target_level = entry_price + target_points
                             position = {
                                 "direction": direction_label, "entry_time": bar[0], "entry_price": entry_price,
                                 "strike": contract["strike_price"], "expiry": expiry,
