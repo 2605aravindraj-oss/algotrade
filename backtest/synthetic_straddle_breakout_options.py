@@ -26,9 +26,22 @@ Entry fills at that signal candle's own close -- no separate breakout-
 confirmation bar, the crossing candle IS the entry, same convention as
 ema_reversal_candle_options.py.
 
-EXIT -- sl_points / target_points (both None by default -- the
-original "target EOD" behavior: no stop-loss, no profit target, held
-to the forced-flat close). Setting either switches that leg to a
+EXIT -- sl_points / target_points, default 14 / 28 (a 1:2 risk/reward,
+retuned from the original "target EOD" -- no stop-loss, no profit
+target, held to the forced-flat close -- which lost heavily on both
+windows tested; pass sl_points=None, target_points=None to restore
+that original behavior). The 14/28 default came from sweeping the 1:2
+ratio track from sl_points=5 up to 30 on 2026-05-16 to 2026-09-08:
+sl_points 11 through 18 is a genuine plateau, not an isolated spike --
+8 consecutive net-positive settings (+Rs 1,874 to +Rs 11,114), while
+the 1:1 ratio track over the same range flips sign almost every step
+(noise, not a finding) and both wider (sl>=20) and tighter (sl<=10)
+settings on the 1:2 track are flat-to-negative. Re-checked out of
+sample on 2025-10-01 to 2026-01-15: sl_points 11-17 stayed positive
+there too (+Rs 2,401 to +Rs 10,878), with 14/28 the strongest and most
+consistent point on BOTH windows -- a real, cross-window-validated
+edge, unlike this codebase's other tuning attempts this session that
+failed to generalize. Setting either switches that leg to a
 premium-points exit, same convention as ema_sweep_breakout_options.py:
     stop_level   = entry premium - sl_points
     target_level = entry premium + target_points
@@ -69,8 +82,8 @@ def run(
     strike_step: int = 50,
     candle_minutes: int = 5,
     strike_search_range: int = 2,
-    sl_points: float | None = None,
-    target_points: float | None = None,
+    sl_points: float | None = 14.0,
+    target_points: float | None = 28.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
