@@ -108,7 +108,40 @@ of what it later does. This is a real restriction (it can only reduce
 the day's trade count, never add one), decision-time-correct throughout
 (a bar never looks at the other leg's FUTURE bars, only same-or-earlier
 timestamps), distinct from simply filtering out "days that turned out
-to be double-leg" after the fact, which would be look-ahead.
+to be double-leg" after the fact, which would be look-ahead. CAVEAT,
+tested across all 4 windows: this is a much weaker fix than the strong
+correlation above implied -- total P&L only rose modestly (+Rs 24,729
+-> +Rs 26,579) and it made the single worst window WORSE, not better
+(-Rs 8,591 -> -Rs 11,891). Correlation in the aggregated data didn't
+translate cleanly into a causal improvement (the restriction also
+removes some of the good second-leg trades, and changes which entry
+gets taken on a would-be double-leg day). Left off by default; kept
+available but not recommended over min_diff_points below.
+
+min_diff_points (default 10.0) -- a stronger, validated pattern-analysis
+finding: across the 248 traded days in all 4 windows, splitting each
+window at ITS OWN MEDIAN Stage-1 |CE_close - PE_close| diff (the gap at
+the selected best_strike -- how tight the put-call-parity fit was),
+the LOOSE half (a less-perfect parity match) beat the tight half in
+ALL 4 windows, including flipping the worst window from -Rs 11,633 to
++Rs 3,042. Reasoning: a very tight CE/PE match likely reflects a calm,
+range-bound reference day with little next-day follow-through, while a
+looser match reflects a day where the strike grid couldn't pin the
+forward as precisely -- more often a trending/skewed session with
+follow-through. Tested as an actual entry filter (skip trading BOTH
+legs entirely on a day if the prior day's diff was below the
+threshold, not just observing the correlation after the fact): swept
+5/8/10/13/15/18/20/25 across all 4 windows and found threshold 8-13 a
+genuine plateau where EVERY window stays net-positive simultaneously
+(outside that band, at least one window turns negative) -- a much
+stronger, more consistent result than one_trade_per_day above. At the
+chosen default of 10: total P&L across all 4 windows rose to +Rs
+28,352 (from +Rs 24,729 unfiltered), the previously-broken window
+(2024-10-01 to 2025-01-31) flipped from -Rs 8,591 to +Rs 2,018 with
+its max drawdown cut from -Rs 13,525 to -Rs 4,567 (a 66% reduction),
+and drawdown improved in 2 of the other 3 windows too. Pass
+min_diff_points=None to disable this filter and trade every day
+regardless of Stage-1 fit quality (the pre-filter behavior).
 """
 from __future__ import annotations
 
@@ -145,7 +178,7 @@ def run(
     target_points: float | None = 26.0,
     exit_mode: str = "sl_target",
     one_trade_per_day: bool = False,
-    min_diff_points: float | None = None,
+    min_diff_points: float | None = 10.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     if exit_mode not in ("sl_target", "avg_reverse"):
