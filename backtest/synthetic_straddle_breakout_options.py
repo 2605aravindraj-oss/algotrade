@@ -89,6 +89,26 @@ One entry per leg per day; a leg already filled that day is not
 re-entered even if its price dips back below avg_price and re-crosses.
 Everything resets at the next day boundary (a fresh reference is
 computed from THAT day's own close for the day after).
+
+one_trade_per_day (default False, for backward compatibility) -- a
+pattern-analysis finding: across all 4 available windows combined
+(359 trades total), days where BOTH legs fired (both CE and PE closed
+above avg_price at some point) went 28.8% win rate, net -Rs 33,181
+across 222 such trades -- while days where only ONE leg ever fired
+went 49.6% win rate, net +Rs 57,910 across 137 trades. A double-leg day
+reads as both sides expanding at once (a choppy/indecisive session,
+often a premium/IV pop rather than a clean directional move), and that
+condition erases most of the edge. Setting one_trade_per_day=True
+enforces AT MOST ONE trade per day, awarded to whichever leg's close
+crosses above avg_price FIRST in time (both legs' candles are merged
+into one shared timeline for this, tie -> CE, matching this module's
+existing tie-break convention elsewhere); once a leg is filled, no
+trade is taken on the other leg for the rest of that day, regardless
+of what it later does. This is a real restriction (it can only reduce
+the day's trade count, never add one), decision-time-correct throughout
+(a bar never looks at the other leg's FUTURE bars, only same-or-earlier
+timestamps), distinct from simply filtering out "days that turned out
+to be double-leg" after the fact, which would be look-ahead.
 """
 from __future__ import annotations
 
@@ -101,6 +121,19 @@ from backtest.sweep_reclaim_breakout import _resample
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
 
+def _check_exit(exit_mode, sl_points, target_points, entry_price, h, l, c, avg_price):
+    """Exit reason string if this bar's H/L/C triggers an exit under the
+    given exit_mode, else None. Stop checked before target if a single
+    bar would touch both (conservative)."""
+    if exit_mode == "avg_reverse":
+        return "avg_reverse" if c < avg_price else None
+    if sl_points is not None and l <= entry_price - sl_points:
+        return "stop_loss"
+    if target_points is not None and h >= entry_price + target_points:
+        return "target"
+    return None
+
+
 def run(
     from_date: str,
     to_date: str,
@@ -111,6 +144,7 @@ def run(
     sl_points: float | None = 13.0,
     target_points: float | None = 26.0,
     exit_mode: str = "sl_target",
+    one_trade_per_day: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     if exit_mode not in ("sl_target", "avg_reverse"):
@@ -180,65 +214,113 @@ def run(
         pe_contract = lookup.get((ref["strike"], "PE"))
         avg_price = ref["avg_price"]
 
-        for contract, opt_type, direction in (
-            (ce_contract, "CE", "LONG"),
-            (pe_contract, "PE", "SHORT"),
-        ):
-            if contract is None:
-                continue
-            bars = _resample(sorted(_day_candles(contract["instrument_key"], d), key=lambda c: c[0]), candle_minutes)
-            if not bars:
-                continue
-            position = None
-            already_traded_today = False
-            for row in bars:
-                ts, o, h, l, c, v, oi = row
-                time_str = ts[11:16]
-                if time_str >= FORCE_FLAT_TIME:
+        if not one_trade_per_day:
+            for contract, opt_type, direction in (
+                (ce_contract, "CE", "LONG"),
+                (pe_contract, "PE", "SHORT"),
+            ):
+                if contract is None:
+                    continue
+                bars = _resample(sorted(_day_candles(contract["instrument_key"], d), key=lambda c: c[0]), candle_minutes)
+                if not bars:
+                    continue
+                position = None
+                already_traded_today = False
+                for row in bars:
+                    ts, o, h, l, c, v, oi = row
+                    time_str = ts[11:16]
+                    if time_str >= FORCE_FLAT_TIME:
+                        if position is not None:
+                            trades.append(OptionTrade(
+                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="eod",
+                            ))
+                            position = None
+                        break
                     if position is not None:
+                        reason = _check_exit(exit_mode, sl_points, target_points, position["entry_price"], h, l, c, avg_price)
+                        if reason is not None:
+                            trades.append(OptionTrade(
+                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason=reason,
+                            ))
+                            position = None
+                    if position is None and not already_traded_today and c > avg_price:
+                        position = {"entry_time": ts, "entry_price": c}
+                        already_traded_today = True
+                if position is not None:
+                    last_ts, last_close = bars[-1][0], bars[-1][4]
+                    trades.append(OptionTrade(
+                        date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                        entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                        exit_time=last_ts, exit_premium=last_close, lot_size=contract["lot_size"], exit_reason="eod_data_end",
+                    ))
+            continue
+
+        # -- one_trade_per_day: merge CE/PE candles into one shared timeline,
+        # award the day's single trade to whichever leg crosses avg_price
+        # first in time (tie -> CE) --
+        if ce_contract is None and pe_contract is None:
+            continue
+        merged: dict[str, dict] = {}
+        if ce_contract is not None:
+            for row in _resample(sorted(_day_candles(ce_contract["instrument_key"], d), key=lambda c: c[0]), candle_minutes):
+                merged.setdefault(row[0], {})["CE"] = row
+        if pe_contract is not None:
+            for row in _resample(sorted(_day_candles(pe_contract["instrument_key"], d), key=lambda c: c[0]), candle_minutes):
+                merged.setdefault(row[0], {})["PE"] = row
+        if not merged:
+            continue
+        timestamps = sorted(merged.keys())
+
+        position = None  # dict: leg, direction, contract, entry_time, entry_price
+        already_traded_today = False
+        for ts in timestamps:
+            time_str = ts[11:16]
+            legs_here = merged[ts]
+            if time_str >= FORCE_FLAT_TIME:
+                if position is not None:
+                    bar = legs_here.get(position["leg"])
+                    exit_price = bar[4] if bar is not None else position["entry_price"]
+                    trades.append(OptionTrade(
+                        date=d, direction=position["direction"], expiry=ref["expiry"], strike=ref["strike"],
+                        entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                        exit_time=ts, exit_premium=exit_price, lot_size=position["contract"]["lot_size"], exit_reason="eod",
+                    ))
+                    position = None
+                break
+            if position is not None:
+                bar = legs_here.get(position["leg"])
+                if bar is not None:
+                    _, o, h, l, c, v, oi = bar
+                    reason = _check_exit(exit_mode, sl_points, target_points, position["entry_price"], h, l, c, avg_price)
+                    if reason is not None:
                         trades.append(OptionTrade(
-                            date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                            date=d, direction=position["direction"], expiry=ref["expiry"], strike=ref["strike"],
                             entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                            exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="eod",
+                            exit_time=ts, exit_premium=c, lot_size=position["contract"]["lot_size"], exit_reason=reason,
                         ))
                         position = None
-                    break
-                if position is not None:
-                    if exit_mode == "avg_reverse":
-                        if c < avg_price:
-                            trades.append(OptionTrade(
-                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="avg_reverse",
-                            ))
-                            position = None
-                    else:
-                        hit_stop = sl_points is not None and l <= position["entry_price"] - sl_points
-                        hit_target = target_points is not None and h >= position["entry_price"] + target_points
-                        if hit_stop:
-                            trades.append(OptionTrade(
-                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="stop_loss",
-                            ))
-                            position = None
-                        elif hit_target:
-                            trades.append(OptionTrade(
-                                date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                                entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                                exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="target",
-                            ))
-                            position = None
-                if position is None and not already_traded_today and c > avg_price:
-                    position = {"entry_time": ts, "entry_price": c}
+            if position is None and not already_traded_today:
+                ce_bar = legs_here.get("CE")
+                pe_bar = legs_here.get("PE")
+                if ce_bar is not None and ce_bar[4] > avg_price:
+                    position = {"leg": "CE", "direction": "LONG", "contract": ce_contract, "entry_time": ts, "entry_price": ce_bar[4]}
                     already_traded_today = True
-            if position is not None:
-                last_ts, last_close = bars[-1][0], bars[-1][4]
-                trades.append(OptionTrade(
-                    date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
-                    entry_time=position["entry_time"], entry_premium=position["entry_price"],
-                    exit_time=last_ts, exit_premium=last_close, lot_size=contract["lot_size"], exit_reason="eod_data_end",
-                ))
+                elif pe_bar is not None and pe_bar[4] > avg_price:
+                    position = {"leg": "PE", "direction": "SHORT", "contract": pe_contract, "entry_time": ts, "entry_price": pe_bar[4]}
+                    already_traded_today = True
+        if position is not None:
+            last_ts = timestamps[-1]
+            last_bar = merged[last_ts].get(position["leg"])
+            last_close = last_bar[4] if last_bar is not None else position["entry_price"]
+            trades.append(OptionTrade(
+                date=d, direction=position["direction"], expiry=ref["expiry"], strike=ref["strike"],
+                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                exit_time=last_ts, exit_premium=last_close, lot_size=position["contract"]["lot_size"], exit_reason="eod_data_end",
+            ))
 
     return trades
 
