@@ -26,12 +26,25 @@ Entry fills at that signal candle's own close -- no separate breakout-
 confirmation bar, the crossing candle IS the entry, same convention as
 ema_reversal_candle_options.py.
 
-EXIT -- "target EOD": no stop-loss, no profit target: once entered,
-each leg is held to the forced-flat close (FORCE_FLAT_TIME), the day's
-target being simply to hold to end of day, per the request. If the
-reference day D's expiry has already passed by the trading day (D was
-itself the expiry date), that contract is dead and no trade is taken
-(no data to trigger on).
+EXIT -- sl_points / target_points (both None by default -- the
+original "target EOD" behavior: no stop-loss, no profit target, held
+to the forced-flat close). Setting either switches that leg to a
+premium-points exit, same convention as ema_sweep_breakout_options.py:
+    stop_level   = entry premium - sl_points
+    target_level = entry premium + target_points
+Same formula regardless of direction (CE and PE are both bought-
+premium positions, so a "stop" always means the premium ITSELF
+falling and a "target" means it rising). Checked against each later
+bar's own high/low, stop checked first if a single bar would touch
+both (conservative); the actual fill is that deciding bar's own close,
+not the literal stop/target level -- same decision-time-correct
+convention as every other premium-SL/target module here. Whichever of
+sl_points/target_points is left None on a leg that has the other set
+just never triggers on that side; if neither is ever hit, the leg
+still falls back to a forced-flat EOD exit. If the reference day D's
+expiry has already passed by the trading day (D was itself the expiry
+date), that contract is dead and no trade is taken (no data to trigger
+on).
 
 One entry per leg per day; a leg already filled that day is not
 re-entered even if its price dips back below avg_price and re-crosses.
@@ -56,6 +69,8 @@ def run(
     strike_step: int = 50,
     candle_minutes: int = 5,
     strike_search_range: int = 2,
+    sl_points: float | None = None,
+    target_points: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -133,6 +148,7 @@ def run(
             if not bars:
                 continue
             position = None
+            already_traded_today = False
             for row in bars:
                 ts, o, h, l, c, v, oi = row
                 time_str = ts[11:16]
@@ -145,8 +161,26 @@ def run(
                         ))
                         position = None
                     break
-                if position is None and c > avg_price:
+                if position is not None:
+                    hit_stop = sl_points is not None and l <= position["entry_price"] - sl_points
+                    hit_target = target_points is not None and h >= position["entry_price"] + target_points
+                    if hit_stop:
+                        trades.append(OptionTrade(
+                            date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                            entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                            exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="stop_loss",
+                        ))
+                        position = None
+                    elif hit_target:
+                        trades.append(OptionTrade(
+                            date=d, direction=direction, expiry=ref["expiry"], strike=ref["strike"],
+                            entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                            exit_time=ts, exit_premium=c, lot_size=contract["lot_size"], exit_reason="target",
+                        ))
+                        position = None
+                if position is None and not already_traded_today and c > avg_price:
                     position = {"entry_time": ts, "entry_price": c}
+                    already_traded_today = True
             if position is not None:
                 last_ts, last_close = bars[-1][0], bars[-1][4]
                 trades.append(OptionTrade(
