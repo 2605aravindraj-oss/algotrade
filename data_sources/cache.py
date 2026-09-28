@@ -48,6 +48,17 @@ CREATE TABLE IF NOT EXISTS expiries (
     underlying_key TEXT, expiry_type TEXT, expiry TEXT,
     PRIMARY KEY (underlying_key, expiry_type, expiry)
 );
+
+CREATE TABLE IF NOT EXISTS future_contracts (
+    underlying_key TEXT, expiry TEXT,
+    instrument_key TEXT, lot_size INTEGER, trading_symbol TEXT,
+    PRIMARY KEY (underlying_key, expiry)
+);
+
+CREATE TABLE IF NOT EXISTS future_expiry_checked (
+    underlying_key TEXT, expiry TEXT, is_real INTEGER,
+    PRIMARY KEY (underlying_key, expiry)
+);
 """
 
 
@@ -156,6 +167,74 @@ def get_day_candles_cached(
             (instrument_key, interval, date),
         )
     return candles
+
+
+def get_expired_future_contract_cached(
+    underlying_key: str, expiry_date: str, access_token: str | None = None
+) -> dict | None:
+    """Expired futures contract for this exact expiry date, or None if
+    this date isn't a genuine futures expiry (most dates returned by
+    get_expired_expiries_cached(underlying_key, "futures") aren't --
+    see upstox_client.get_expired_future_contract). Both hits and
+    misses are cached, so repeatedly probing the many non-real dates
+    costs one live API call each, not one per call."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT is_real FROM future_expiry_checked WHERE underlying_key=? AND expiry=?",
+            (underlying_key, str(expiry_date)),
+        ).fetchone()
+        if row is not None:
+            if not row[0]:
+                return None
+            r = conn.execute(
+                "SELECT instrument_key, lot_size, trading_symbol FROM future_contracts "
+                "WHERE underlying_key=? AND expiry=?",
+                (underlying_key, str(expiry_date)),
+            ).fetchone()
+            return {"instrument_key": r[0], "lot_size": r[1], "trading_symbol": r[2], "expiry": str(expiry_date)} if r else None
+
+    contracts = upstox_client.get_expired_future_contract(underlying_key, expiry_date, access_token)
+    time.sleep(API_SLEEP_SECONDS)
+    with _conn() as conn:
+        if not contracts:
+            conn.execute(
+                "INSERT OR IGNORE INTO future_expiry_checked VALUES (?,?,0)",
+                (underlying_key, str(expiry_date)),
+            )
+            return None
+        c = contracts[0]
+        conn.execute(
+            "INSERT OR IGNORE INTO future_expiry_checked VALUES (?,?,1)",
+            (underlying_key, str(expiry_date)),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO future_contracts VALUES (?,?,?,?,?)",
+            (underlying_key, str(expiry_date), c["instrument_key"], c["lot_size"], c["trading_symbol"]),
+        )
+    return {"instrument_key": c["instrument_key"], "lot_size": c["lot_size"], "trading_symbol": c["trading_symbol"], "expiry": str(expiry_date)}
+
+
+def resolve_expired_futures_contract_for_date(
+    underlying_key: str, target_date: str, access_token: str | None = None
+) -> dict | None:
+    """The futures contract that was listed and trading on target_date:
+    the nearest GENUINE monthly futures expiry >= target_date. Probes
+    candidate expiry dates (from get_expired_expiries_cached(...,
+    "futures"), which includes many non-real dates) in order until one
+    resolves to a real contract; every probe is cached so repeat calls
+    for nearby dates are free. Returns None if target_date is beyond
+    the last expired futures contract (e.g. it falls within the
+    currently-live, not-yet-expired front-month contract's own
+    window) -- callers should fall back to a live/current-month
+    resolver in that case."""
+    candidates = sorted(
+        e for e in get_expired_expiries_cached(underlying_key, "futures", access_token) if e >= target_date
+    )
+    for expiry in candidates:
+        contract = get_expired_future_contract_cached(underlying_key, expiry, access_token)
+        if contract is not None:
+            return contract
+    return None
 
 
 def stats() -> dict:

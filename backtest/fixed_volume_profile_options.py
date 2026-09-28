@@ -179,18 +179,37 @@ def run(
     if strategy_mode not in ("poc_magnet", "vah_val_reversion", "breakout"):
         raise ValueError('strategy_mode must be "poc_magnet", "vah_val_reversion", or "breakout"')
 
-    futures = _resolve_current_month_futures()
-    futures_key = futures["instrument_key"]
-
-    fut_days = upstox_client.get_daily_history(futures_key, from_date, to_date)
-    fut_days.sort(key=lambda d: d["date"])
-    if len(fut_days) < 2:
+    # Trading-day calendar from the INDEX (spans years, unlike any single
+    # futures contract's own listing window) -- the actual futures
+    # contract to fetch is resolved separately, per day, below.
+    trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
+    trading_days.sort(key=lambda d: d["date"])
+    if len(trading_days) < 2:
         return []
 
+    live_futures_cache: dict | None = None
+
+    def _contract_for_day(date_str: str) -> tuple[dict, bool]:
+        """(contract, expired) for whichever futures contract was listed
+        on date_str: an already-expired (rolled-off) monthly contract
+        for any older date, resolved via the expired-instruments API;
+        falls back to the current live front-month contract (public,
+        no-auth endpoint) once date_str runs past the last expired
+        expiry -- i.e. the most recent, still-live contract's window."""
+        nonlocal live_futures_cache
+        expired_contract = cache.resolve_expired_futures_contract_for_date(underlying_key, date_str, access_token)
+        if expired_contract is not None:
+            return expired_contract, True
+        if live_futures_cache is None:
+            live_futures_cache = _resolve_current_month_futures()
+        return live_futures_cache, False
+
     day_1min: dict[str, list[list]] = {}
-    for day in fut_days:
-        day_1min[day["date"]] = sorted(
-            cache.get_day_candles_cached(futures_key, "1minute", day["date"], expired=False),
+    for day in trading_days:
+        d = day["date"]
+        contract, expired = _contract_for_day(d)
+        day_1min[d] = sorted(
+            cache.get_day_candles_cached(contract["instrument_key"], "1minute", d, expired=expired, access_token=access_token),
             key=lambda c: c[0],
         )
 
@@ -219,9 +238,9 @@ def run(
         return _bar_at_or_after(candles, at_time) or _bar_at_or_before(candles, at_time)
 
     trades: list[OptionTrade] = []
-    for i in range(1, len(fut_days)):
-        d = fut_days[i]["date"]
-        profile = profiles[fut_days[i - 1]["date"]]
+    for i in range(1, len(trading_days)):
+        d = trading_days[i]["date"]
+        profile = profiles[trading_days[i - 1]["date"]]
         if profile is None:
             continue
         bars = _resample(day_1min[d], candle_minutes)

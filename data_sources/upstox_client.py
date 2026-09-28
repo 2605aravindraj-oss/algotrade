@@ -146,6 +146,27 @@ def get_expired_option_chain(
     return resp.json()["data"]
 
 
+def get_expired_future_contract(
+    underlying_key: str, expiry_date: str | date, access_token: str | None = None
+) -> list[dict]:
+    """List expired futures contract(s) for one expiry date. Requires auth.
+    NOTE: most dates returned by get_expired_expiries(..., "futures") turn
+    out NOT to be genuine monthly futures expiries -- that expiry-type list
+    also contains extra (options-cadence-looking) dates that return an
+    EMPTY list here rather than an error. Verified empirically: probing
+    known dates, only the actual last-Tuesday/Thursday-of-month expiry
+    returns a contract. Callers should treat an empty result as "not a
+    real futures expiry, try another date," not as a fetch failure.
+    """
+    resp = _get_with_retry(
+        f"{BASE_URL}/expired-instruments/future/contract",
+        params={"instrument_key": underlying_key, "expiry_date": str(expiry_date)},
+        headers=_auth_headers(access_token),
+    )
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
 def get_expired_candles(
     expired_instrument_key: str,
     interval: str,
