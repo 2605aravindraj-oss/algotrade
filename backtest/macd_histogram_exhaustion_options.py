@@ -83,6 +83,7 @@ def run(
     macd_slow: int = 26,
     macd_signal: int = 9,
     min_histogram_points: float = 6.0,
+    decel_bars: int = 1,
     sl_points: float = 8.0,
     target_points: float = 10.0,
     access_token: str | None = None,
@@ -136,6 +137,7 @@ def run(
     regime = None          # "bearish" / "bullish" / None
     extreme_hist = None
     strong_confirmed = False
+    decel_count = 0
     prev_hist = None
 
     for i, row in enumerate(bars):
@@ -149,6 +151,7 @@ def run(
             regime = None
             extreme_hist = None
             strong_confirmed = False
+            decel_count = 0
             prev_hist = None
 
         atm = oc.round_to_step(c, strike_step)
@@ -190,34 +193,46 @@ def run(
             # -- regime detection (fresh zero-cross starts/resets tracking) --
             if prev_hist is not None:
                 if prev_hist >= 0 and hi < 0:
-                    regime, extreme_hist, strong_confirmed = "bearish", hi, False
+                    regime, extreme_hist, strong_confirmed, decel_count = "bearish", hi, False, 0
                 elif prev_hist <= 0 and hi > 0:
-                    regime, extreme_hist, strong_confirmed = "bullish", hi, False
+                    regime, extreme_hist, strong_confirmed, decel_count = "bullish", hi, False, 0
                 elif regime == "bearish" and hi >= 0:
                     regime = extreme_hist = None
                     strong_confirmed = False
+                    decel_count = 0
                 elif regime == "bullish" and hi <= 0:
                     regime = extreme_hist = None
                     strong_confirmed = False
+                    decel_count = 0
 
-            # -- extreme tracking + strong confirmation --
+            # -- extreme tracking + strong confirmation + consecutive-deceleration count --
             if regime == "bearish":
                 if extreme_hist is None or hi < extreme_hist:
                     extreme_hist = hi
+                    decel_count = 0
+                elif prev_hist is not None and hi > prev_hist:
+                    decel_count += 1
+                else:
+                    decel_count = 0
                 if not strong_confirmed and extreme_hist <= -min_histogram_points:
                     strong_confirmed = True
             elif regime == "bullish":
                 if extreme_hist is None or hi > extreme_hist:
                     extreme_hist = hi
+                    decel_count = 0
+                elif prev_hist is not None and hi < prev_hist:
+                    decel_count += 1
+                else:
+                    decel_count = 0
                 if not strong_confirmed and extreme_hist >= min_histogram_points:
                     strong_confirmed = True
 
-            # -- deceleration entry --
-            if position is None and strong_confirmed and prev_hist is not None and expiry is not None:
+            # -- deceleration entry (decel_bars consecutive decelerating bars) --
+            if position is None and strong_confirmed and decel_count >= decel_bars and expiry is not None:
                 direction_label = None
-                if regime == "bearish" and hi > prev_hist and hi < 0:
+                if regime == "bearish" and hi < 0:
                     direction_label = "LONG"
-                elif regime == "bullish" and hi < prev_hist and hi > 0:
+                elif regime == "bullish" and hi > 0:
                     direction_label = "SHORT"
                 if direction_label is not None:
                     opt_type = "CE" if direction_label == "LONG" else "PE"
