@@ -1,6 +1,7 @@
 """Synthetic-ATM straddle breakout, realized through real NIFTY options.
 Daily reference computed from one day's option CLOSING prices, traded
-the NEXT day on 5-minute candles.
+the NEXT day on 1-minute candles (candle_minutes default, retuned down
+from an original 5-minute default -- see TIMEFRAME note below).
 
 STAGE 1 -- find the "true" ATM strike for day D (a strike-selection
 refinement on top of this codebase's usual round-to-nearest-50): among
@@ -15,33 +16,47 @@ skew. Call this best_strike; call its avg_price = (CE_close +
 PE_close) / 2 the day's reference level.
 
 STAGE 2 -- next trading day, watch that SAME contract (best_strike,
-same expiry) on 5-minute candles:
-    LONG (buy that CE):  the first 5-min candle whose CE close breaks
-                          above the PRIOR day's avg_price.
-    SHORT (buy that PE):  the first 5-min candle whose PE close breaks
-                          above the PRIOR day's avg_price -- the two
-                          legs are watched independently (both can fire
-                          the same day; each fires at most once).
+same expiry) on candle_minutes candles (default 1):
+    LONG (buy that CE):  the first candle whose CE close breaks above
+                          the PRIOR day's avg_price.
+    SHORT (buy that PE):  the first candle whose PE close breaks above
+                          the PRIOR day's avg_price -- the two legs are
+                          watched independently (both can fire the same
+                          day; each fires at most once).
 Entry fills at that signal candle's own close -- no separate breakout-
 confirmation bar, the crossing candle IS the entry, same convention as
 ema_reversal_candle_options.py.
 
-EXIT -- sl_points / target_points, default 14 / 28 (a 1:2 risk/reward,
+TIMEFRAME: candle_minutes defaults to 1 (originally 5). Tested across 4
+non-overlapping windows spanning the full available option-data history
+(2024-10-01 to 2026-09-08 in 4 chunks) at the sl=14/target=28 setting
+below: 1-minute entries beat 5-minute on 3 of 4 windows and roughly
+halved the loss on the 4th (net total across all 4 windows: +Rs 21,134
+on 1-min vs -Rs 5,214 on 5-min) -- a broad improvement, not concentrated
+in one window.
+
+EXIT -- sl_points / target_points, default 13 / 26 (a 1:2 risk/reward,
 retuned from the original "target EOD" -- no stop-loss, no profit
-target, held to the forced-flat close -- which lost heavily on both
-windows tested; pass sl_points=None, target_points=None to restore
-that original behavior). The 14/28 default came from sweeping the 1:2
-ratio track from sl_points=5 up to 30 on 2026-05-16 to 2026-09-08:
-sl_points 11 through 18 is a genuine plateau, not an isolated spike --
-8 consecutive net-positive settings (+Rs 1,874 to +Rs 11,114), while
-the 1:1 ratio track over the same range flips sign almost every step
-(noise, not a finding) and both wider (sl>=20) and tighter (sl<=10)
-settings on the 1:2 track are flat-to-negative. Re-checked out of
-sample on 2025-10-01 to 2026-01-15: sl_points 11-17 stayed positive
-there too (+Rs 2,401 to +Rs 10,878), with 14/28 the strongest and most
-consistent point on BOTH windows -- a real, cross-window-validated
-edge, unlike this codebase's other tuning attempts this session that
-failed to generalize. Setting either switches that leg to a
+target, held to the forced-flat close -- which lost heavily; pass
+sl_points=None, target_points=None to restore that original behavior).
+Tuning history: on 5-minute candles, sweeping the 1:2 ratio track found
+sl_points 11-18 a genuine plateau (not an isolated spike) on the first
+window tested, which held up on a second window too -- but a THIRD
+window (2024-10-01 to 2025-01-31) came back deeply negative across
+that entire plateau, showing the tuning doesn't hold up across all
+market regimes. After switching to 1-minute entries (see TIMEFRAME
+above), re-swept the 1:2 ratio track and found a new, similarly genuine
+plateau at sl_points 9-14 (bounded by noise below and a cliff above) on
+the original window, peaking at sl=12. Validated across all 4 windows:
+every setting from 9-14 is STILL negative on that same problem window
+(2024-10-01 to 2025-01-31, -Rs 2,767 to -Rs 10,140 depending on
+setting) -- confirming that specific period is a genuinely hard regime
+for this strategy, not fixable by exit tuning -- but the other 3
+windows are solidly positive across most of the range. Totals across
+all 4 windows: sl=13/target=26 (+Rs 24,729) edges out sl=14/target=28
+(+Rs 21,134), a difference small enough to be noise between two
+adjacent plateau points; 13/26 was picked as the default per user
+preference. Setting either switches that leg to a
 premium-points exit, same convention as ema_sweep_breakout_options.py:
     stop_level   = entry premium - sl_points
     target_level = entry premium + target_points
@@ -91,10 +106,10 @@ def run(
     to_date: str,
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
-    candle_minutes: int = 5,
+    candle_minutes: int = 1,
     strike_search_range: int = 2,
-    sl_points: float | None = 14.0,
-    target_points: float | None = 28.0,
+    sl_points: float | None = 13.0,
+    target_points: float | None = 26.0,
     exit_mode: str = "sl_target",
     access_token: str | None = None,
 ) -> list[OptionTrade]:
