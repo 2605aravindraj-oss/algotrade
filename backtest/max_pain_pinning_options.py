@@ -161,30 +161,42 @@ def run(
         )
         return contract, sorted(candles, key=lambda c: c[0])
 
-    # -- reference: max pain per prior trading day --
+    # -- reference: max pain per prior trading day, computed LAZILY -- only
+    # for a day D whose expiry is still valid AND whose next trading day
+    # would actually pass the near_expiry_only filter, since computing max
+    # pain fetches ~2*max_pain_strike_range contracts' candle data and is
+    # by far the most expensive part of this backtest --
+    trading_dates = [day["date"] for day in trading_days]
+    expiry_by_day = {d: next((e for e in expiries if e >= d), None) for d in trading_dates}
     max_pain_by_day: dict[str, dict | None] = {}
-    for day in trading_days:
-        d = day["date"]
-        expiry = next((e for e in expiries if e >= d), None)
+
+    def _reference_for(d: str) -> dict | None:
+        if d in max_pain_by_day:
+            return max_pain_by_day[d]
+        expiry = expiry_by_day[d]
         idx_close = _index_close(d)
         if expiry is None or idx_close is None:
             max_pain_by_day[d] = None
-            continue
+            return None
         atm_guess = oc.round_to_step(idx_close, strike_step)
         max_pain = compute_max_pain(underlying_key, expiry, d, atm_guess, strike_step, max_pain_strike_range, access_token)
         max_pain_by_day[d] = {"max_pain": max_pain, "expiry": expiry} if max_pain is not None else None
+        return max_pain_by_day[d]
 
     trades: list[OptionTrade] = []
-    trading_dates = [day["date"] for day in trading_days]
     for i in range(1, len(trading_dates)):
         d = trading_dates[i]
-        ref = max_pain_by_day[trading_dates[i - 1]]
-        if ref is None or ref["expiry"] < d:
+        prev_d = trading_dates[i - 1]
+        prev_expiry = expiry_by_day[prev_d]
+        if prev_expiry is None or prev_expiry < d:
             continue
         if near_expiry_only:
-            dte = (_dt.date.fromisoformat(ref["expiry"]) - _dt.date.fromisoformat(d)).days
+            dte = (_dt.date.fromisoformat(prev_expiry) - _dt.date.fromisoformat(d)).days
             if dte > near_expiry_days:
                 continue
+        ref = _reference_for(prev_d)
+        if ref is None:
+            continue
 
         day_bars = [b for b in bars if b[0][:10] == d]
         if not day_bars:
