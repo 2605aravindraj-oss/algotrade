@@ -28,10 +28,13 @@ LIVE data sources (all public, no auth):
         derived/delayed source).
     Live NIFTY option instrument keys: Upstox's public instrument
         master (assets.upstox.com/.../NSE.json.gz), filtered to NIFTY
-        weekly options; the nearest not-yet-expired weekly is picked,
-        ATM by the underlying's current price. The option's own
-        premium candles come from the same get_intraday_candles call,
-        applied to that contract's instrument_key.
+        CE/PE contracts (NOT further filtered by the master's own
+        `weekly` flag -- see _load_nifty_weekly_chain for a bug that
+        filter caused and its fix); the nearest not-yet-expired
+        contract is picked, ATM by the underlying's current price. The
+        option's own premium candles come from the same
+        get_intraday_candles call, applied to that contract's
+        instrument_key.
 
 State (open pattern, open paper position, last-processed bar) persists
 to data/paper_trader_state.json across restarts -- resuming after a
@@ -113,6 +116,15 @@ _nifty_weekly_chain_cache: list[dict] | None = None
 
 
 def _load_nifty_weekly_chain() -> list[dict]:
+    """All NIFTY CE/PE contracts currently in the instrument master. NOT
+    filtered by the master's own `weekly` flag: verified directly (on
+    2026-09-29) that a contract expiring THAT SAME DAY carries
+    weekly=False in the master, while every contract a week or more out
+    carries weekly=True -- filtering on it made live_contract_resolver
+    skip the correct, currently-tradeable nearest expiry on its own
+    expiry day and jump to the one after it instead (found via a live
+    discrepancy against a broker app's own option chain, while checking
+    live/synthetic_straddle_today.py, which had the same bug)."""
     global _nifty_weekly_chain_cache
     if _nifty_weekly_chain_cache is not None:
         return _nifty_weekly_chain_cache
@@ -121,7 +133,7 @@ def _load_nifty_weekly_chain() -> list[dict]:
     data = json.loads(gzip.decompress(resp.content))
     _nifty_weekly_chain_cache = [
         d for d in data
-        if d.get("name") == "NIFTY" and d.get("instrument_type") in ("CE", "PE") and d.get("weekly")
+        if d.get("name") == "NIFTY" and d.get("instrument_type") in ("CE", "PE")
     ]
     return _nifty_weekly_chain_cache
 

@@ -18,9 +18,14 @@ sources instead:
     Today (Stage 2, live entries): upstox_client.get_intraday_candles --
         "today so far" directly off the exchange feed, no auth needed.
     Current week's contract list: Upstox's public instrument master
-        (assets.upstox.com/.../NSE.json.gz), filtered to NIFTY weekly
-        options, same approach as live_contract_resolver in
-        ema_sweep_paper_trader.py.
+        (assets.upstox.com/.../NSE.json.gz), filtered to NIFTY CE/PE
+        contracts -- NOT further filtered by the master's own `weekly`
+        flag, which is false on a contract's own expiry day (a bug
+        found and fixed here; see _load_nifty_weekly_chain). This
+        module's approach started from live_contract_resolver in
+        ema_sweep_paper_trader.py, which has the same `weekly`-flag
+        filter and so likely carries the same bug -- not yet fixed
+        there.
 
 Parameters (SL_POINTS, TARGET_POINTS, MIN_DIFF_POINTS, STRIKE_STEP,
 CANDLE_MINUTES) mirror the validated defaults in
@@ -60,12 +65,21 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _load_nifty_weekly_chain() -> list[dict]:
+    """All NIFTY CE/PE contracts currently in Upstox's instrument master.
+    NOT filtered by the master's own `weekly` flag -- that flag is false
+    on a contract's OWN expiry day (verified directly: on 2026-09-29,
+    the day's own 2026-09-29 expiry contracts existed in the master but
+    carried weekly=False, while every contract dated a week or more out
+    carried weekly=True), so filtering on it made
+    _nearest_unexpired_expiry skip straight past the correct, currently-
+    tradeable nearest expiry to the one after it -- a real bug, caught
+    by a live discrepancy against a broker app's own option chain."""
     resp = requests.get(INSTRUMENTS_URL, timeout=30)
     resp.raise_for_status()
     data = json.loads(gzip.decompress(resp.content))
     return [
         d for d in data
-        if d.get("name") == "NIFTY" and d.get("instrument_type") in ("CE", "PE") and d.get("weekly")
+        if d.get("name") == "NIFTY" and d.get("instrument_type") in ("CE", "PE")
     ]
 
 
