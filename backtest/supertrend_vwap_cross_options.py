@@ -61,6 +61,14 @@ in choppy stretches), which is why very different sl_pct values
 produce non-monotonic results across windows -- the mechanism is
 path-dependent re-entry behavior, not a simple loss cap.
 
+target_pct (default None): a second ADDED exit, same
+percentage-of-premium convention as sl_pct -- when set, the position
+also exits (exit_reason="target") the moment the option's own
+premium rises to entry_price*(1+target_pct), checked ahead of the
+trend-reversal exit (SL is still checked first of all three). Also
+not part of the original sourced spec -- target_pct=None preserves
+the sl_pct-only behavior above exactly.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -89,6 +97,7 @@ def run(
     st_period: int = 10,
     st_multiplier: float = 3.0,
     sl_pct: float | None = 0.10,
+    target_pct: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -197,14 +206,19 @@ def run(
             cur_dir = st_dir[i]
             is_long = position["direction"] == "LONG"
             hit_reversal = cur_dir is not None and ((is_long and cur_dir == -1) or (not is_long and cur_dir == 1))
-            hit_sl_pct = False
-            if sl_pct is not None:
+            hit_sl_pct = hit_target_pct = False
+            if sl_pct is not None or target_pct is not None:
                 _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
                 bar = _fill(candles, decision_time_str) if candles else None
                 cur_premium = bar[4] if bar else position["entry_price"]
-                hit_sl_pct = cur_premium <= position["entry_price"] * (1 - sl_pct)
+                if sl_pct is not None:
+                    hit_sl_pct = cur_premium <= position["entry_price"] * (1 - sl_pct)
+                if target_pct is not None:
+                    hit_target_pct = cur_premium >= position["entry_price"] * (1 + target_pct)
             if hit_sl_pct:
                 _close("stop_loss")
+            elif hit_target_pct:
+                _close("target")
             elif hit_reversal:
                 _close("trend_reverse")
 
