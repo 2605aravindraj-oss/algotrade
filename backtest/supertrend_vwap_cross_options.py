@@ -61,13 +61,26 @@ in choppy stretches), which is why very different sl_pct values
 produce non-monotonic results across windows -- the mechanism is
 path-dependent re-entry behavior, not a simple loss cap.
 
-target_pct (default None): a second ADDED exit, same
-percentage-of-premium convention as sl_pct -- when set, the position
-also exits (exit_reason="target") the moment the option's own
-premium rises to entry_price*(1+target_pct), checked ahead of the
-trend-reversal exit (SL is still checked first of all three). Also
-not part of the original sourced spec -- target_pct=None preserves
-the sl_pct-only behavior above exactly.
+target_pct (default None -- kept off, see below): a second ADDED
+exit, same percentage-of-premium convention as sl_pct -- when set,
+the position also exits (exit_reason="target") the moment the
+option's own premium rises to entry_price*(1+target_pct), checked
+ahead of the trend-reversal exit (SL is still checked first of all
+three). Also not part of the original sourced spec -- target_pct=
+None preserves the sl_pct-only behavior above exactly.
+
+Swept {0.15, 0.25, 0.35, 0.5, 0.75, 1.0} x sl_pct=0.10 across all 4
+established windows: EVERY value makes total net P&L worse than no
+target at all (Rs 42,978 with no target vs a best of Rs 21,317 at
+target_pct=0.35, and as low as -Rs 20,634 at 0.15); the worst case
+(target_pct=0.5/0.75 on the 2026-05-16/2026-09-08 window) blows max
+drawdown out to -Rs 45,951 to -Rs 50,235, beyond even the original
+bare-strategy number. This strategy's edge comes from occasional
+large trend-reversal-exit wins (best trades Rs 17,000-19,500); a
+fixed percentage target chops exactly those trades short at a
+fraction of their eventual move, trimming the tail that carries the
+whole P&L. Conclusion: do not enable target_pct here -- it stays
+None by design, not merely by default.
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
