@@ -35,17 +35,31 @@ the forced-flat close -- ride the trend until SuperTrend reverses,
 same "trend_flip" exit convention as supertrend_pivot_options.py
 (exit_reason="trend_reverse"). Forced flat at FORCE_FLAT_TIME.
 
-sl_pct (default None -- the behavior above, unmodified): an ADDED
-protective floor beyond what the original spec called for, since
-backtesting it bare (ride-until-reversal only) showed large drawdowns
-(-Rs 25,570 to -Rs 36,588 across the 4 tested windows). When set, the
-position also exits (exit_reason="stop_loss", checked BEFORE the
-trend-reversal exit if both would trigger on the same bar) the moment
-the option's own premium falls to entry_price*(1-sl_pct) -- same
-percentage-of-premium convention as other modules here (e.g.
-orb_ema_ride_options.py's 40% stop). This is a deliberate addition on
-top of the sourced strategy, not part of its original rules --
-sl_pct=None reproduces the original unmodified behavior exactly.
+sl_pct (default 0.10): an ADDED protective floor beyond what the
+original spec called for, since backtesting it bare (ride-until-
+reversal only) showed large drawdowns (-Rs 25,570 to -Rs 36,588
+across the 4 tested windows). When set, the position also exits
+(exit_reason="stop_loss", checked BEFORE the trend-reversal exit if
+both would trigger on the same bar) the moment the option's own
+premium falls to entry_price*(1-sl_pct) -- same percentage-of-premium
+convention as other modules here (e.g. orb_ema_ride_options.py's 40%
+stop). This is a deliberate addition on top of the sourced strategy,
+not part of its original rules -- sl_pct=None reproduces the
+original unmodified behavior exactly.
+
+sl_pct=0.10 was chosen by sweeping 0.05-0.40 on all 4 established
+windows: it sits in a genuine plateau with 0.125 (both far above
+every other tested value, not an isolated spike) and gives the best
+total net P&L (Rs 42,978 vs Rs 28,070 baseline) AND the best
+worst-case single-window drawdown (-Rs 30,888 vs -Rs 36,588
+baseline) of any value tested. It improves BOTH net P&L and max
+drawdown in 3 of the 4 windows; the 4th (2024-10-01/2025-01-31) is
+slightly worse on both (-Rs 1,281 P&L, +Rs 4,213 drawdown) -- a minor
+cost for the gain elsewhere. The stop causes more same-day
+re-entries after a shaken-out position (trade count roughly doubles
+in choppy stretches), which is why very different sl_pct values
+produce non-monotonic results across windows -- the mechanism is
+path-dependent re-entry behavior, not a simple loss cap.
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
@@ -74,7 +88,7 @@ def run(
     candle_minutes: int = 5,
     st_period: int = 10,
     st_multiplier: float = 3.0,
-    sl_pct: float | None = None,
+    sl_pct: float | None = 0.10,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
