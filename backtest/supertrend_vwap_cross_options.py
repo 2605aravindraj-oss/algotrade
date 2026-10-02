@@ -32,8 +32,20 @@ crosses below the SuperTrend line" and "SuperTrend direction flips
 bearish" are one and the same event, not two separate checks). No
 profit target was given, so this is also the ONLY way out short of
 the forced-flat close -- ride the trend until SuperTrend reverses,
-same "trend_flip" exit convention as supertrend_pivot_options.py.
-Forced flat at FORCE_FLAT_TIME.
+same "trend_flip" exit convention as supertrend_pivot_options.py
+(exit_reason="trend_reverse"). Forced flat at FORCE_FLAT_TIME.
+
+sl_pct (default None -- the behavior above, unmodified): an ADDED
+protective floor beyond what the original spec called for, since
+backtesting it bare (ride-until-reversal only) showed large drawdowns
+(-Rs 25,570 to -Rs 36,588 across the 4 tested windows). When set, the
+position also exits (exit_reason="stop_loss", checked BEFORE the
+trend-reversal exit if both would trigger on the same bar) the moment
+the option's own premium falls to entry_price*(1-sl_pct) -- same
+percentage-of-premium convention as other modules here (e.g.
+orb_ema_ride_options.py's 40% stop). This is a deliberate addition on
+top of the sourced strategy, not part of its original rules --
+sl_pct=None reproduces the original unmodified behavior exactly.
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
@@ -62,6 +74,7 @@ def run(
     candle_minutes: int = 5,
     st_period: int = 10,
     st_multiplier: float = 3.0,
+    sl_pct: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -170,8 +183,16 @@ def run(
             cur_dir = st_dir[i]
             is_long = position["direction"] == "LONG"
             hit_reversal = cur_dir is not None and ((is_long and cur_dir == -1) or (not is_long and cur_dir == 1))
-            if hit_reversal:
+            hit_sl_pct = False
+            if sl_pct is not None:
+                _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
+                bar = _fill(candles, decision_time_str) if candles else None
+                cur_premium = bar[4] if bar else position["entry_price"]
+                hit_sl_pct = cur_premium <= position["entry_price"] * (1 - sl_pct)
+            if hit_sl_pct:
                 _close("stop_loss")
+            elif hit_reversal:
+                _close("trend_reverse")
 
         if position is None and vwap is not None and prev_vwap is not None and prev_close is not None and st_dir[i] is not None and expiry is not None:
             crossed_above = prev_close <= prev_vwap and c > vwap
