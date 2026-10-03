@@ -29,10 +29,13 @@ SIGNAL/EXIT LOGIC: identical to backtest.supertrend_vwap_cross_options
 -- SuperTrend(ST_PERIOD, ST_MULTIPLIER) direction + a fresh VWAP cross
 on CANDLE_MINUTES futures bars, filtered by EMA_FILTER_PERIOD (only
 takes the signal if price is on the trend-confirming side of that
-EMA), triggers an ATM CE/PE buy; SL_PCT premium stop (checked first),
-fixed profit target (TARGET_PCT, off by design -- see that module's
-docstring for why), SuperTrend reversal, or forced-flat at
-FORCE_FLAT_TIME closes it. VWAP resets at every day
+EMA) and by the CHOP_LOOKBACK_DAYS/CHOP_MIN_EFFICIENCY day-level
+regime gate (no new entries at all on a day whose trailing INDEX
+trend efficiency is too low -- see that module's docstring for the
+full reasoning), triggers an ATM CE/PE buy; SL_PCT premium stop
+(checked first), fixed profit target (TARGET_PCT, off by design --
+see that module's docstring for why), SuperTrend reversal, or
+forced-flat at FORCE_FLAT_TIME closes it. VWAP resets at every day
 boundary; SuperTrend is computed over the full warmup+today series
 (it needs the continuity) but the day's trading -- entries, the open
 position, VWAP -- is simulated starting fresh at today's first bar
@@ -78,6 +81,8 @@ ST_MULTIPLIER = 3.0
 SL_PCT = 0.10
 TARGET_PCT = None  # deliberately off -- see backtest module's docstring
 EMA_FILTER_PERIOD = 45
+CHOP_LOOKBACK_DAYS = 15
+CHOP_MIN_EFFICIENCY = 0.07
 WARMUP_DAYS = 7
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -115,6 +120,27 @@ def _fill(candles, at_time):
     return _bar_at_or_after(candles, at_time) or _bar_at_or_before(candles, at_time)
 
 
+def _is_chop_day() -> bool:
+    """Same day-level regime gate as backtest.supertrend_vwap_cross_
+    options's chop_lookback_days/chop_min_efficiency: trailing
+    CHOP_LOOKBACK_DAYS INDEX closes ending yesterday (no lookahead),
+    trend efficiency = net move / sum of |daily moves|."""
+    today = date.today()
+    days = upstox_client.get_daily_history(
+        UNDERLYING_KEY,
+        (today - timedelta(days=CHOP_LOOKBACK_DAYS * 3)).isoformat(),
+        (today - timedelta(days=1)).isoformat(),
+    )
+    days.sort(key=lambda d: d["date"])
+    if len(days) < CHOP_LOOKBACK_DAYS:
+        return False
+    window = [d["close"] for d in days[-CHOP_LOOKBACK_DAYS:]]
+    net_move = abs(window[-1] - window[0])
+    abs_moves = sum(abs(window[k] - window[k - 1]) for k in range(1, len(window)))
+    efficiency = net_move / abs_moves if abs_moves > 0 else 0.0
+    return efficiency < CHOP_MIN_EFFICIENCY
+
+
 def check_today() -> dict:
     """One-shot snapshot: today's SuperTrend/VWAP state, trades closed
     today so far, and the current open position (if any). Read-only,
@@ -126,6 +152,9 @@ def check_today() -> dict:
 
     st_dir, _st_line = _compute_supertrend_line(bars, ST_PERIOD, ST_MULTIPLIER)
     ema_filter = _ema([b[4] for b in bars], EMA_FILTER_PERIOD) if EMA_FILTER_PERIOD else None
+    chop_today = (
+        _is_chop_day() if CHOP_LOOKBACK_DAYS is not None and CHOP_MIN_EFFICIENCY is not None else False
+    )
 
     today_str = date.today().isoformat()
     today_idx = [i for i, b in enumerate(bars) if b[0][:10] == today_str]
@@ -206,7 +235,8 @@ def check_today() -> dict:
             elif hit_reversal:
                 _close("trend_reverse")
 
-        if position is None and vwap is not None and prev_vwap is not None and prev_close is not None and st_dir[i] is not None:
+        if (position is None and vwap is not None and prev_vwap is not None and prev_close is not None
+                and st_dir[i] is not None and not chop_today):
             crossed_above = prev_close <= prev_vwap and c > vwap
             crossed_below = prev_close >= prev_vwap and c < vwap
             direction_label = None
@@ -246,6 +276,7 @@ def check_today() -> dict:
         "futures_close": bars[last_i][4],
         "supertrend_dir": "bullish" if st_dir[last_i] == 1 else "bearish" if st_dir[last_i] == -1 else "unknown",
         "vwap": vwap,
+        "chop_today": chop_today,
         "closed_trades": trades,
         "open_position": position,
     }
@@ -259,6 +290,8 @@ def main() -> None:
     print(f"Expiry: {r['expiry']}")
     print(f"Last bar: {r['last_bar_time']}  futures_close={r['futures_close']:.2f}  "
           f"vwap={r['vwap']:.2f}  supertrend={r['supertrend_dir']}")
+    if r["chop_today"]:
+        print("CHOP FILTER: market regime is choppy -- no new entries will be taken today.")
     if not r["closed_trades"] and not r["open_position"]:
         print("\nNo entries yet today.")
     for t in r["closed_trades"]:

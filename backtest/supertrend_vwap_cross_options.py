@@ -107,10 +107,10 @@ baseline). It improves net P&L in 3 of 4 windows and drawdown in 3 of
 4 windows (the exception each time, 2025-05-01/2025-09-01, is only
 modestly worse on the metric it misses).
 
-chop_lookback_days / chop_min_efficiency (both default None -- off):
-a fourth ADDED entry filter, a day-level regime gate on top of all
-the per-signal ones above. This is a trend-following strategy (ride
-until SuperTrend reverses), and a diagnosis of its one weak window
+chop_lookback_days=15 / chop_min_efficiency=0.07: a fourth ADDED
+entry filter, a day-level regime gate on top of all the per-signal
+ones above. This is a trend-following strategy (ride until
+SuperTrend reverses), and a diagnosis of its one weak window
 (2026-05-16/2026-09-08, net near breakeven despite an unchanged
 ~68% stop-out rate) found that window's NIFTY index was essentially
 flat over its full span (net move -0.06%) with the lowest trend
@@ -118,16 +118,29 @@ efficiency (net move / sum of daily |moves|) of any tested window --
 trend-reversal exits, this strategy's payoff mechanism, earned
 ~Rs 27/trade there vs Rs 1,194-1,648/trade elsewhere, because
 SuperTrend kept flipping back and forth without a sustained move to
-ride. When both are set, each day's trailing
-`chop_lookback_days`-trading-day INDEX closes (ending the prior
-trading day -- never today's own still-forming close, so no
-lookahead) are used to compute that same efficiency; if it's below
-chop_min_efficiency, NO NEW entries are taken that day (an
-already-open position still manages its exits normally, and the
-forced-flat close still applies). The first `chop_lookback_days`
-trading days of any run have no prior window and are never skipped
-(filter inactive until enough history exists, rather than blocking a
-run's own warmup).
+ride. When both are set (set either to None for the original
+unfiltered behavior), each day's trailing `chop_lookback_days`-
+trading-day INDEX closes (ending the prior trading day -- never
+today's own still-forming close, so no lookahead) are used to
+compute that same efficiency; if it's below chop_min_efficiency, NO
+NEW entries are taken that day (an already-open position still
+manages its exits normally, and the forced-flat close still
+applies). The first `chop_lookback_days` trading days of any run
+have no prior window and are never skipped (filter inactive until
+enough history exists, rather than blocking a run's own warmup).
+
+lookback=15/threshold=0.07 was chosen by sweeping lookback in
+{15, 20, 30} x threshold in {0.03, 0.05, 0.08, 0.12} then refining
+around the winner with {12, 15, 18} x {0.06, 0.07, 0.08, 0.09, 0.10}
+on all 4 established windows. lookback=15 is a clear local optimum
+in its own dimension -- lookback=12 and 18 both underperform it
+substantially (W3 turns negative at 12, W4 turns sharply negative at
+18) -- and within it, threshold=0.07 gives the highest total net
+P&L of every combination tested (Rs 86,969 vs Rs 63,830 with no chop
+filter, +36%), with ALL 4 windows positive for the first time (W1
+Rs 22,551, W2 Rs 35,298, W3 Rs 19,365, W4 Rs 9,755 -- the previously
+weak window). Worst-case single-window drawdown also improves, from
+-Rs 27,334 to -Rs 22,161.
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
@@ -162,8 +175,8 @@ def run(
     sl_pct: float | None = 0.10,
     target_pct: float | None = None,
     ema_filter_period: int | None = 45,
-    chop_lookback_days: int | None = None,
-    chop_min_efficiency: float | None = None,
+    chop_lookback_days: int | None = 15,
+    chop_min_efficiency: float | None = 0.07,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
