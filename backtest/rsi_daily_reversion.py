@@ -220,6 +220,59 @@ def run_reliance_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]
     return run(from_date, to_date, RELIANCE_EQUITY_KEY, **overrides)
 
 
+HDFCBANK_EQUITY_KEY = "NSE_EQ|INE040A01034"
+
+
+def run_hdfcbank_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]:
+    """run() with HDFC Bank's own fine-tuned daily RSI config, re-swept
+    from scratch -- Reliance's config (16/38/50) applied unchanged gave
+    a much weaker result here (net Rs 9,025, max drawdown -Rs 19,335 on
+    the 2015-01-01/2026-09-08 history), confirming yet again that these
+    parameters don't transfer across instruments.
+
+    rsi_period x oversold (exit_threshold=50 held fixed first): the
+    first broad grid ({8,10,...,25} x {20,25,...,45}) was noisy and
+    inconsistent -- net P&L flips sign depending on period, and
+    drawdown is often comparable to or bigger than net profit. Filling
+    in a finer grid ({6,7,8,10,12,14} x {40,42,43,44,45,46,48}) found a
+    genuine, wide plateau: nearly every combination nets Rs 2,700-
+    27,000 with 66-78% win rates and -Rs 15,000 to -Rs 20,000 drawdown
+    -- short RSI periods (6-14) with a SHALLOW oversold read (40-48,
+    much shallower than Reliance's 38) are what works for this stock.
+    rsi_period=7, oversold=44 is the best point in that plateau.
+
+    exit_threshold was then swept at rsi_period=7/oversold=44 and
+    turned out to be UNSTABLE, not a lever: net P&L oscillates wildly
+    with small changes (Rs 54,691 at exit_threshold=63, down to
+    Rs 38,762 at 65, back up to Rs 57,847 at 70) while max drawdown
+    gets monotonically WORSE as the threshold rises (-Rs 17,529 at 50
+    up to -Rs 28,826 by 66+). Each local spike is a handful of trades'
+    hold period stretching just long enough to catch one big move, not
+    a repeatable edge -- the same isolated-spike pattern rejected
+    elsewhere in this module and in the NIFTY options module. Chasing
+    it would mean trading a stable, well-supported result for a
+    noisier, more drawdown-heavy one on the strength of a few lucky
+    trades. exit_threshold=50 (RSI back to neutral) was kept instead,
+    exactly as it transferred unchanged from Reliance.
+
+    Final: rsi_period=7, oversold=44, exit_threshold=50 -- 155 trades,
+    net Rs 21,376.82, 73.5% win rate, max drawdown -Rs 17,529.33 (close
+    to the single worst trade, -Rs 16,223 -- no losing streak, same
+    pattern as Reliance). Materially weaker risk-adjusted performance
+    than Reliance (net/drawdown ratio ~1.2 vs Reliance's ~11.4) --
+    HDFC Bank's daily mean-reversion dips are shallower and the
+    recoveries less decisive than Reliance's, so this edge is real but
+    modest. stop_loss_pct/target_pct/max_hold_days were not re-swept
+    for this stock; given they hurt the (much stronger) Reliance edge
+    by the same mechanism (truncating recoveries), they are left off
+    here too by default rather than assumed safe.
+    """
+    overrides.setdefault("rsi_period", 7)
+    overrides.setdefault("oversold", 44)
+    overrides.setdefault("exit_threshold", 50)
+    return run(from_date, to_date, HDFCBANK_EQUITY_KEY, **overrides)
+
+
 def summary(trades: list[Trade]) -> str:
     from backtest.rsi2_reversion import summary as _summary
     return _summary(trades)
