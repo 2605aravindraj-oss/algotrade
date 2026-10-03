@@ -148,6 +148,19 @@ Rs 22,551, W2 Rs 35,298, W3 Rs 19,365, W4 Rs 9,755 -- the previously
 weak window). Worst-case single-window drawdown also improves, from
 -Rs 27,334 to -Rs 22,161.
 
+min_cross_distance_points (default None -- off): a fifth ADDED entry
+filter, aimed directly at the stop-loss rate itself rather than at
+resizing it (sl_pct controls how big a loss is paid, this controls
+how OFTEN one is paid at all). ~68% of trades are stop-outs across
+every sl_pct value tried, which doesn't move with the stop's size --
+suggesting a lot of entries are marginal crosses (futures price pokes
+a point or two past VWAP, then snaps back) rather than decisive
+breaks. When set, a cross is only taken if the futures close is at
+least min_cross_distance_points away from VWAP at the signal bar
+(checked after the SuperTrend+VWAP-cross condition, before the EMA
+filter) -- same bar, same entry timing, just a higher bar for what
+counts as a real cross.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -183,6 +196,7 @@ def run(
     ema_filter_period: int | None = 45,
     chop_lookback_days: int | None = 15,
     chop_min_efficiency: float | None = 0.07,
+    min_cross_distance_points: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -338,6 +352,10 @@ def run(
                 direction_label = "LONG"
             elif st_dir[i] == -1 and crossed_below:
                 direction_label = "SHORT"
+
+            if direction_label is not None and min_cross_distance_points is not None:
+                if abs(c - vwap) < min_cross_distance_points:
+                    direction_label = None
 
             if direction_label is not None and ema_filter is not None:
                 ema_val = ema_filter[i]
