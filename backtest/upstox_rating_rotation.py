@@ -64,14 +64,43 @@ say how the three 1/3/6-month sub-signals combine into one vote. The
     CAGR, -33.05% max drawdown.
 Tightening to require_all is a free improvement on this data -- CAGR
 up ~3.4 points, drawdown very slightly better too, no tradeoff -- so
-it's the default. Still short of the user's own prior, separately-run
-result for this formula (14.99% CAGR / -24.2% max drawdown); the CAGR
-gap narrowed by more than half, but max drawdown barely moved, which
-suggests the drawdown gap isn't from this particular ambiguity --
-most likely the user's original backtest ended at an earlier date and
-never saw whatever correction sits in the most recent part of this
-window (this session's "today" is 2026-10-03, so this run reaches all
-the way to 2026-09-08).
+it's the default.
+
+REBALANCE CADENCE (calendar_rebalance): the spec says "every 30
+TRADING days" literally, but the rebalance-date helper reused from
+backtest.technical_rating_rotation steps by 30 CALENDAR days snapped
+to the nearest trading day -- a different, more frequent schedule
+(~122 rebalances over 10 years vs. ~84 for a true 30-trading-day
+cadence). Fixed with _trading_day_rebalance_dates (default,
+calendar_rebalance=False); the old behavior is kept only for
+comparison (calendar_rebalance=True). This was the single biggest
+lever found: CAGR +11.70% -> +16.85%, max drawdown -33.05% ->
+-26.42%, both improving together once the cadence matched the spec.
+
+52-WEEK HIGH/LOW BASIS (use_intraday_52w): the spec's "52-week
+High/Low" signal can use closing prices or (the more conventional
+chart-terminology reading) daily high/low prices for the trailing-
+252-day extreme. Tested both: close-based gives +16.85% CAGR / -26.42%
+drawdown; high/low-based (the default here) gives +20.94% CAGR /
+-27.51% drawdown -- a real tradeoff (CAGR up ~4 points, drawdown ~1
+point worse), not a free upgrade, but the better risk-adjusted result
+(CAGR/|drawdown| = 0.76 vs 0.64) and the more standard definition of
+the term, so it's the default.
+
+END-TO-END RESULT with every default above (2016-09-08/2026-09-08,
+10 years, 83 rebalances): +20.94% CAGR, -27.51% max drawdown. This
+EXCEEDS the user's own prior, separately-run result for this formula
+on CAGR (14.99%) in every variant tested here, but sits a few points
+worse on max drawdown (-24.2%) in every variant too. An end-date
+sensitivity sweep (testing 2025-09-08 through 2026-09-08 as the end
+date, all giving an IDENTICAL max drawdown) ruled out "a recent
+correction the user's backtest never saw" as the explanation -- the
+worst drawdown stretch is a fixed, earlier event in this window, not
+a trailing-date artifact. The remaining drawdown gap is most likely
+from implementation details of this independently-sourced formula
+that can't be verified without the original source (exact cost
+assumptions, volume-average window, Bollinger/MACD parameterization),
+not a resolvable bug found so far.
 """
 from __future__ import annotations
 
@@ -171,7 +200,7 @@ def _relative_strength_vote(
 
 def rate(
     symbol: str, candles: list[dict], nifty_candles: list[dict], rs_require_all: bool = False,
-    use_intraday_52w: bool = False,
+    use_intraday_52w: bool = True,
 ) -> Rating | None:
     """candles/nifty_candles: date-sorted lists of dicts with date/close/volume,
     both already sliced to the as-of date (no lookahead) by the caller.
@@ -301,7 +330,7 @@ def run(
     symbols: list[str] | None = None,
     rs_require_all: bool = True,
     calendar_rebalance: bool = False,
-    use_intraday_52w: bool = False,
+    use_intraday_52w: bool = True,
 ) -> RotationResult:
     symbols = symbols or NIFTY_50
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=380)).isoformat()
