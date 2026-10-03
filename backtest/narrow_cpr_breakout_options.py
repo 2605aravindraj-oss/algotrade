@@ -227,6 +227,48 @@ def run(
     return trades
 
 
+def run_nifty(from_date: str, to_date: str, **overrides) -> list[OptionTrade]:
+    """run() with NIFTY's own fine-tuned config, found by sweeping from
+    scratch on the 2024-10-03/2026-09-08 window (the only span this
+    codebase's expired NIFTY options chain covers).
+
+    BOTH SIDES (the bare signal): narrow_cpr_max_width_pct swept
+    {0.05-1.0} was noisy with no clean plateau -- net P&L bounced from
+    -Rs 17,669 to +Rs 17,663 with no clear trend, net roughly
+    breakeven-to-negative everywhere. Splitting into long_only vs
+    short_only revealed why: long_only (CE breakouts above TC) is
+    UNANIMOUSLY bad across every threshold 0.05-0.20 (net -Rs 26,713
+    to -Rs 74,442, 13-22% win rate) -- the noisy both-sides result was
+    a cancellation of a real loser and a real winner, not two weak
+    signals. The upside breakout essentially never works; a narrow
+    CPR after an advance resolves as exhaustion far more often than
+    continuation for this index.
+
+    SHORT ONLY (PE breakdowns below BC): unanimously positive across
+    every threshold 0.05-0.20 (net Rs 4,525 to Rs 37,464). A fine grid
+    across {0.09-0.13} confirmed a genuine, smooth plateau (net
+    Rs 26,156-35,067, no spikes) -- narrow_cpr_max_width_pct=0.10 is
+    the best point in it (net Rs 34,350, max drawdown -Rs 20,364.72,
+    the best net/drawdown ratio of the plateau).
+
+    sl_pct and target_pct were both swept and REJECTED -- every value
+    tested for either (sl: 0.10-0.40; target: 0.25-1.5) underperforms
+    leaving both off, with target_pct=0.25 actively disastrous (net
+    -Rs 460 vs Rs 34,350 unfiltered). This is a low-win-rate (26.1%),
+    big-average-win (Rs 4,831 vs -Rs 1,032 avg loss) breakdown-
+    continuation strategy -- clipping winners early with a tight
+    target or stop removes exactly the tail that pays for the many
+    small losses. Both stay off by design.
+
+    Final: narrow_cpr_max_width_pct=0.10, short_only=True, no sl/
+    target -- 69 trades, net Rs 34,349.96, 26.1% win rate, max
+    drawdown -Rs 20,364.72.
+    """
+    overrides.setdefault("narrow_cpr_max_width_pct", 0.10)
+    overrides.setdefault("short_only", True)
+    return run(from_date, to_date, **overrides)
+
+
 def summary(trades: list[OptionTrade]) -> str:
     from backtest.macd_rsi2_momentum_options import summary as _summary
     return _summary(trades)
