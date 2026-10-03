@@ -216,6 +216,44 @@ filter off (+58%), win rate up (29.4% vs 27.4%), AND max drawdown down
 Rs 41,862 at 0.05; back down to ~Rs 149,000 and worse drawdown by
 0.40), confirming this is a real structural optimum.
 
+WALK-FORWARD VALIDATION (vs. the single full-period backtest above):
+every number so far was tuned using the WHOLE 2024-10-03/2026-09-08
+window at once, which risks fitting that specific history. To check,
+sl_pct was re-picked from scratch on an EXPANDING trailing window
+(train only on data strictly before each test quarter) and applied
+PURELY out-of-sample to the next quarter, chained across 7 quarterly
+folds (2025-01-01 through 2026-09-08; 2024-10-03/2024-12-31 spent as
+the initial training-only seed, never tested). Every single fold,
+independently, re-selected sl_pct=0.15 from {0.10, 0.15, 0.20, 0.25,
+None} -- it never flipped to a different value once, which is strong
+evidence 0.15 is a real structural optimum rather than a number that
+happened to win on this window by luck.
+
+Chained walk-forward result: 445 trades, 29.2% win rate, net
+Rs 139,970, max drawdown -Rs 29,416 -- versus the full-period
+backtest's 479 trades, 29.2% win rate (IDENTICAL), net Rs 163,227, max
+drawdown -Rs 29,416 (also IDENTICAL -- the worst drawdown stretch
+falls inside a walk-forward-tested quarter, using the same sl_pct=0.15
+either way, so it reproduces exactly). The ~Rs 23,000 P&L gap is
+almost entirely just the trades from the initial training-only
+quarter (never counted as out-of-sample), not performance lost to
+overfitting -- walk-forward recovers ~86% of the full-period net P&L
+with an identical win rate and an identical worst case. Fold-by-fold:
+6 of 7 quarters net positive (Rs 7,814 to Rs 42,039), one small loss
+in the most recent quarter (2026-07-01/2026-09-08: -Rs 2,041) -- a
+realistic soft patch, not a blowup. This is the strongest
+overfitting-resistance result of any strategy in this codebase so far.
+
+Caveat: only sl_pct was re-optimized per fold -- st_period,
+st_multiplier, ema_filter_period, chop_lookback_days/
+chop_min_efficiency, and narrow_cpr_max_width_pct were all held fixed
+at their already-established values throughout, since a 3-6 month
+expanding training window has too few trades to reliably re-sweep six
+parameters jointly. This validates "does the already-tuned strategy's
+edge survive honest out-of-sample testing", not "would a from-scratch
+walk-forward optimizer have found the same parameters" -- a narrower
+but still meaningful claim.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
