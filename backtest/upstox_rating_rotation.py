@@ -170,13 +170,18 @@ def _relative_strength_vote(
 
 
 def rate(
-    symbol: str, candles: list[dict], nifty_candles: list[dict], rs_require_all: bool = False
+    symbol: str, candles: list[dict], nifty_candles: list[dict], rs_require_all: bool = False,
+    use_intraday_52w: bool = False,
 ) -> Rating | None:
     """candles/nifty_candles: date-sorted lists of dicts with date/close/volume,
-    both already sliced to the as-of date (no lookahead) by the caller."""
+    both already sliced to the as-of date (no lookahead) by the caller.
+    use_intraday_52w: the 52-week High/Low vote uses daily HIGH/LOW prices
+    (the conventional "52-week high/low" definition) instead of closes."""
     if len(candles) < MIN_HISTORY_DAYS:
         return None
     closes = [c["close"] for c in candles]
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
     volumes = [c["volume"] for c in candles]
     nifty_closes = [c["close"] for c in nifty_candles]
     price = closes[-1]
@@ -217,8 +222,11 @@ def rate(
         votes.append(1 if price < lower else (-1 if price > upper else 0))
 
     if len(closes) >= 252:
-        window = closes[-252:]
-        hi, lo = max(window), min(window)
+        if use_intraday_52w:
+            hi, lo = max(highs[-252:]), min(lows[-252:])
+        else:
+            window = closes[-252:]
+            hi, lo = max(window), min(window)
         if price >= hi * 0.95:
             votes.append(1)
         elif price <= lo * 1.05:
@@ -293,6 +301,7 @@ def run(
     symbols: list[str] | None = None,
     rs_require_all: bool = True,
     calendar_rebalance: bool = False,
+    use_intraday_52w: bool = False,
 ) -> RotationResult:
     symbols = symbols or NIFTY_50
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=380)).isoformat()
@@ -334,7 +343,7 @@ def run(
             idx = date_index[sym].get(as_of_date)
             if idx is None:
                 continue
-            r = rate(sym, candles[:idx + 1], nifty_slice, rs_require_all=rs_require_all)
+            r = rate(sym, candles[:idx + 1], nifty_slice, rs_require_all=rs_require_all, use_intraday_52w=use_intraday_52w)
             if r is not None:
                 rated.append(r)
         rated.sort(key=lambda r: r.score, reverse=True)
