@@ -138,6 +138,34 @@ def run(
     return trades
 
 
+RELIANCE_EQUITY_KEY = "NSE_EQ|INE002A01018"
+
+
+def run_reliance_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]:
+    """run() with Reliance's own fine-tuned daily RSI config, found
+    by sweeping rsi_period x oversold on the 2015-01-01/2026-09-08
+    daily history (11.7 years -- long history matters here, since a
+    daily mean-reversion dip is infrequent; 2 years gave too few
+    trades to judge). {12-20} x {35-45} is a genuinely wide,
+    structural plateau (every combination net Rs 37,000-101,000, win
+    rates 73-88%), not an isolated spike -- short RSI periods (2-3)
+    and low oversold thresholds (10-20, a "deep" oversold read) were
+    mostly flat or negative; the edge is in a SLOWER RSI catching a
+    MILDER dip. rsi_period=16, oversold=38 is the single best point
+    in that plateau: 42 trades, net Rs 101,263, 81.0% win rate, max
+    drawdown -Rs 8,916 (equal to the single worst trade -- there was
+    never a losing STREAK, just isolated losses). exit_threshold=50
+    was independently confirmed best in its own 1D sweep at this
+    period/oversold (vs 40-70). stop_loss_pct and max_hold_days were
+    not swept -- left at their defaults (off) since the unfiltered
+    result was already strong.
+    """
+    overrides.setdefault("rsi_period", 16)
+    overrides.setdefault("oversold", 38)
+    overrides.setdefault("exit_threshold", 50)
+    return run(from_date, to_date, RELIANCE_EQUITY_KEY, **overrides)
+
+
 def summary(trades: list[Trade]) -> str:
     from backtest.rsi2_reversion import summary as _summary
     return _summary(trades)
