@@ -125,9 +125,14 @@ def _bollinger(closes: list[float], period: int = 20, mult: float = 2.0) -> tupl
     return mean + mult * std, mean - mult * std  # upper, lower
 
 
-def _relative_strength_vote(stock_closes: list[float], nifty_closes: list[float]) -> int | None:
-    """+1/-1 by majority of computable {1mo, 3mo, 6mo} windows beating NIFTY's
-    own return over the same window; None if no window is computable yet."""
+def _relative_strength_vote(
+    stock_closes: list[float], nifty_closes: list[float], require_all: bool = False
+) -> int | None:
+    """+1/-1 on the computable {1mo, 3mo, 6mo} windows beating NIFTY's own
+    return over the same window; None if no window is computable yet.
+    require_all=False (default): majority of computable windows must beat.
+    require_all=True (tightened): EVERY computable window must beat -- a
+    single miss on any window votes Bearish."""
     windows = [21, 63, 126]
     beats = []
     n = min(len(stock_closes), len(nifty_closes))
@@ -139,11 +144,15 @@ def _relative_strength_vote(stock_closes: list[float], nifty_closes: list[float]
         beats.append(stock_ret > nifty_ret)
     if not beats:
         return None
+    if require_all:
+        return 1 if all(beats) else -1
     bull_count = sum(beats)
     return 1 if bull_count * 2 >= len(beats) else -1
 
 
-def rate(symbol: str, candles: list[dict], nifty_candles: list[dict]) -> Rating | None:
+def rate(
+    symbol: str, candles: list[dict], nifty_candles: list[dict], rs_require_all: bool = False
+) -> Rating | None:
     """candles/nifty_candles: date-sorted lists of dicts with date/close/volume,
     both already sliced to the as-of date (no lookahead) by the caller."""
     if len(candles) < MIN_HISTORY_DAYS:
@@ -200,7 +209,7 @@ def rate(symbol: str, candles: list[dict], nifty_candles: list[dict]) -> Rating 
     else:
         votes.append(None)
 
-    votes.append(_relative_strength_vote(closes, nifty_closes))
+    votes.append(_relative_strength_vote(closes, nifty_closes, require_all=rs_require_all))
 
     if len(volumes) >= 21:
         avg_vol = sum(volumes[-21:-1]) / 20
@@ -253,6 +262,7 @@ def run(
     starting_capital: float = 1_000_000.0,
     top_n: int = 5,
     symbols: list[str] | None = None,
+    rs_require_all: bool = False,
 ) -> RotationResult:
     symbols = symbols or NIFTY_50
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=380)).isoformat()
@@ -291,7 +301,7 @@ def run(
             idx = date_index[sym].get(as_of_date)
             if idx is None:
                 continue
-            r = rate(sym, candles[:idx + 1], nifty_slice)
+            r = rate(sym, candles[:idx + 1], nifty_slice, rs_require_all=rs_require_all)
             if r is not None:
                 rated.append(r)
         rated.sort(key=lambda r: r.score, reverse=True)
