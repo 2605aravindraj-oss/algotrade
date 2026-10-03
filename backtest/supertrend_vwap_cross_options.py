@@ -107,6 +107,28 @@ baseline). It improves net P&L in 3 of 4 windows and drawdown in 3 of
 4 windows (the exception each time, 2025-05-01/2025-09-01, is only
 modestly worse on the metric it misses).
 
+chop_lookback_days / chop_min_efficiency (both default None -- off):
+a fourth ADDED entry filter, a day-level regime gate on top of all
+the per-signal ones above. This is a trend-following strategy (ride
+until SuperTrend reverses), and a diagnosis of its one weak window
+(2026-05-16/2026-09-08, net near breakeven despite an unchanged
+~68% stop-out rate) found that window's NIFTY index was essentially
+flat over its full span (net move -0.06%) with the lowest trend
+efficiency (net move / sum of daily |moves|) of any tested window --
+trend-reversal exits, this strategy's payoff mechanism, earned
+~Rs 27/trade there vs Rs 1,194-1,648/trade elsewhere, because
+SuperTrend kept flipping back and forth without a sustained move to
+ride. When both are set, each day's trailing
+`chop_lookback_days`-trading-day INDEX closes (ending the prior
+trading day -- never today's own still-forming close, so no
+lookahead) are used to compute that same efficiency; if it's below
+chop_min_efficiency, NO NEW entries are taken that day (an
+already-open position still manages its exits normally, and the
+forced-flat close still applies). The first `chop_lookback_days`
+trading days of any run have no prior window and are never skipped
+(filter inactive until enough history exists, rather than blocking a
+run's own warmup).
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -114,6 +136,8 @@ resets at every day boundary. Requires an Upstox access token
 the option premiums).
 """
 from __future__ import annotations
+
+from datetime import datetime, timedelta
 
 from data_sources import cache, upstox_client
 from backtest import options_common as oc
@@ -138,12 +162,35 @@ def run(
     sl_pct: float | None = 0.10,
     target_pct: float | None = None,
     ema_filter_period: int | None = 45,
+    chop_lookback_days: int | None = None,
+    chop_min_efficiency: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if len(trading_days) < 1:
         return []
+
+    chop_skip_days: set[str] = set()
+    if chop_lookback_days is not None and chop_min_efficiency is not None:
+        warmup_from = (
+            datetime.strptime(from_date, "%Y-%m-%d") - timedelta(days=chop_lookback_days * 3)
+        ).strftime("%Y-%m-%d")
+        chop_days = upstox_client.get_daily_history(underlying_key, warmup_from, to_date)
+        chop_days.sort(key=lambda d: d["date"])
+        chop_closes = {d["date"]: d["close"] for d in chop_days}
+        chop_dates = sorted(chop_closes)
+        for day in trading_days:
+            d = day["date"]
+            idx = chop_dates.index(d)
+            if idx < chop_lookback_days:
+                continue
+            window = [chop_closes[dd] for dd in chop_dates[idx - chop_lookback_days:idx]]
+            net_move = abs(window[-1] - window[0])
+            abs_moves = sum(abs(window[k] - window[k - 1]) for k in range(1, len(window)))
+            efficiency = net_move / abs_moves if abs_moves > 0 else 0.0
+            if efficiency < chop_min_efficiency:
+                chop_skip_days.add(d)
 
     live_futures_cache: dict | None = None
 
@@ -263,7 +310,8 @@ def run(
             elif hit_reversal:
                 _close("trend_reverse")
 
-        if position is None and vwap is not None and prev_vwap is not None and prev_close is not None and st_dir[i] is not None and expiry is not None:
+        if (position is None and vwap is not None and prev_vwap is not None and prev_close is not None
+                and st_dir[i] is not None and expiry is not None and d not in chop_skip_days):
             crossed_above = prev_close <= prev_vwap and c > vwap
             crossed_below = prev_close >= prev_vwap and c < vwap
             direction_label = None
