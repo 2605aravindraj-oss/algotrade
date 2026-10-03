@@ -229,6 +229,40 @@ def run(
     return trades
 
 
+RELIANCE_EQUITY_KEY = "NSE_EQ|INE002A01018"
+
+
+def run_reliance_long_only(from_date: str, to_date: str, access_token: str | None = None, **overrides) -> list[Trade]:
+    """run() with Reliance's own fine-tuned LONG-ONLY config. The
+    bare long-only signal was net negative (-Rs 21,418 on the full
+    continuous 2024-10-01/2026-09-08 backtest); sl_points and
+    ema_filter_period were both swept and neither helped (every
+    value tested stayed negative). The two filters that DO turn it
+    positive, swept and combined:
+      chop_lookback_days=15, chop_min_efficiency=0.15 -- alone,
+        roughly breakeven (Rs 86).
+      narrow_cpr_max_width_pct=0.15 -- alone, the stronger lever
+        (net Rs 8,605, max drawdown -Rs 6,209, an 81% drawdown cut
+        from the unfiltered baseline's -Rs 32,675); {0.10-0.16} forms
+        a genuine plateau (net P&L Rs 3,474-8,605), not an isolated
+        spike.
+      Combined, net P&L is barely lower (Rs 7,769 vs Rs 8,605 for
+        CPR alone) but max drawdown drops much further, to -Rs 2,803
+        -- roughly double the net/drawdown ratio of CPR alone (2.77
+        vs 1.39). This is the config used here.
+    Absolute P&L is modest in scale (a few thousand rupees over ~2
+    years on 100 shares) -- this is a small, single-stock long-only
+    carve-out, not a strategy sized to replace the index-level ones.
+    """
+    overrides.setdefault("long_only", True)
+    overrides.setdefault("sl_points", None)
+    overrides.setdefault("ema_filter_period", None)
+    overrides.setdefault("chop_lookback_days", 15)
+    overrides.setdefault("chop_min_efficiency", 0.15)
+    overrides.setdefault("narrow_cpr_max_width_pct", 0.15)
+    return run(from_date, to_date, RELIANCE_EQUITY_KEY, access_token=access_token, **overrides)
+
+
 def summary(trades: list[Trade]) -> str:
     from backtest.rsi2_reversion import summary as _summary
     return _summary(trades)
