@@ -172,6 +172,26 @@ def run_reliance_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]
     period/oversold (vs 40-70). stop_loss_pct and max_hold_days were
     not swept -- left at their defaults (off) since the unfiltered
     result was already strong.
+
+    stop_loss_pct and target_pct were later swept too (both off by
+    design -- here's why). stop_loss_pct in {2,3,4,5,7,10,15}: every
+    value made max drawdown dramatically WORSE (-Rs 21,000 to -Rs
+    32,000+, vs the unfiltered -Rs 8,916) for flat-to-negative net
+    P&L -- a tight stop on a mean-reversion dip just converts a trade
+    that would have recovered into a realized loss, and cranks trade
+    count up (47-79 vs 42) without adding edge. target_pct in
+    {3,3.5,4,4.5,5,5.5,6,6.5,7,10,15,20}: net P&L is flat at baseline
+    (Rs 101,263) for every value except a single spike at exactly 5
+    (Rs 106,590). That spike is NOT a genuine plateau -- target=4.5
+    (Rs 99,376) and target=5.5 (Rs 101,038) both sit BELOW it, and an
+    entry-matched trade diff (by entry_time, not list index, since
+    trade counts differ) showed the gain is ~95% one incidental
+    re-entry side effect: a position that exits one day earlier frees
+    the single-position slot for an unrelated extra trade the
+    baseline never takes, not a repeatable structural edge. Rejected
+    for the same reason min_cross_distance_points/require_hold_bar
+    were rejected in the NIFTY options module -- isolated spike, not
+    a plateau. Both parameters stay off.
     """
     overrides.setdefault("rsi_period", 16)
     overrides.setdefault("oversold", 38)
