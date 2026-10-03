@@ -238,6 +238,60 @@ def run_reliance(from_date: str, to_date: str, **overrides) -> list[Trade]:
     return run(from_date, to_date, RELIANCE_EQUITY_KEY, **overrides)
 
 
+HDFCBANK_EQUITY_KEY = "NSE_EQ|INE040A01034"
+
+
+def run_hdfcbank(from_date: str, to_date: str, **overrides) -> list[Trade]:
+    """run() with HDFC Bank's own fine-tuned daily SuperTrend+VWAP
+    config, re-swept from scratch -- Reliance's config (12/3.0/50,
+    long_only) applied unchanged to HDFC Bank gave a much weaker result
+    (net Rs 19,052.85, max drawdown -Rs 10,390.56), confirming yet
+    again that these parameters don't transfer across instruments.
+
+    BIGGEST DIFFERENCE FROM RELIANCE: for HDFC Bank the BOTH-SIDES
+    signal clearly beats long_only -- the opposite of Reliance, where
+    long_only was essential. At vwap_lookback_days=20, every (st_period,
+    st_multiplier) combination with st_multiplier in {2.5, 3.0} was
+    strongly positive on both sides (net Rs 24,000-42,000, drawdown
+    -Rs 13,000 to -Rs 17,000) across st_period 7-20; long_only on the
+    same grid roughly HALVES the result (e.g. st_period=10/mult=3.0:
+    Rs 37,293 both-sides vs Rs 25,476 long-only). Shorts are a genuine
+    contributor here, not a drag to filter out.
+
+    A finer grid (st_period 14-24, st_multiplier 2.25-3.25) confirmed a
+    real, symmetric plateau centered on st_multiplier 2.5-3.0 -- net
+    P&L is tight and consistent at both multipliers across every period
+    tested (Rs 34,000-44,000), falling off smoothly outside that band
+    (st_multiplier 2.25 and 3.25 are both much weaker and far noisier).
+    vwap_lookback_days was then swept at st_period=20/st_multiplier=2.5
+    and found a hump peaking at 25 days; a fine grid from 21-29 confirmed
+    it's a genuine neighborhood (every value nets Rs 44,000-62,000), not
+    an isolated spike.
+
+    ema_filter_period gives a small, flat, genuinely free improvement:
+    every value from 8-25 performs the same or better than unfiltered
+    (same max drawdown throughout), with a mild plateau at 20-22 (net
+    Rs 66,232-66,572 vs Rs 62,404 unfiltered) -- included since it costs
+    nothing. chop and narrow-CPR were both tried on top and REJECTED:
+    every chop/CPR value tested reduced net P&L below the unfiltered
+    baseline (chop: Rs 10,029-41,747 vs Rs 62,404; CPR: -Rs 7,063 to
+    Rs 23,514 vs Rs 62,404) -- both stay off.
+
+    Final: st_period=20, st_multiplier=2.5, vwap_lookback_days=25,
+    ema_filter_period=20, long_only=False -- 57 trades, net
+    Rs 66,572.31, 50.9% win rate, max drawdown -Rs 14,824.19 (net/
+    drawdown ratio ~4.5). Both sides contribute: longs win rate 64.0%
+    net Rs 53,727.42, shorts win rate 40.6% net Rs 12,844.88 -- shorts
+    are a smaller, lower-win-rate but genuinely positive contributor,
+    not dead weight.
+    """
+    overrides.setdefault("st_period", 20)
+    overrides.setdefault("st_multiplier", 2.5)
+    overrides.setdefault("vwap_lookback_days", 25)
+    overrides.setdefault("ema_filter_period", 20)
+    return run(from_date, to_date, HDFCBANK_EQUITY_KEY, **overrides)
+
+
 def summary(trades: list[Trade]) -> str:
     from backtest.rsi2_reversion import summary as _summary
     return _summary(trades)
