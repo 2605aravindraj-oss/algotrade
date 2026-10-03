@@ -187,10 +187,54 @@ RELIANCE_EQUITY_KEY = "NSE_EQ|INE002A01018"
 
 
 def run_reliance(from_date: str, to_date: str, **overrides) -> list[Trade]:
-    """run() against Reliance's own NSE_EQ instrument. No tuned defaults
-    yet -- a from-scratch sweep (st_period/st_multiplier/vwap_lookback_days
-    first, then the EMA/chop/CPR filters) is pending; this wrapper exists
-    so the tuned config has a stable place to land once that sweep is done."""
+    """run() with Reliance's own fine-tuned daily SuperTrend+VWAP config,
+    found by sweeping from scratch on the 2015-01-01/2026-09-08 daily
+    history.
+
+    BOTH-SIDES signal: every (st_period, st_multiplier) combination
+    tested at vwap_lookback_days=20 was net negative or barely positive,
+    with the same long/short asymmetry seen in the NIFTY futures module
+    (longs positive, shorts deeply negative). Raising vwap_lookback_days
+    on the both-sides signal helped up to a point (30-60 days climbed
+    from Rs 15,063 to Rs 70,553) then reversed (100+ days went negative
+    again) -- not a usable lever on its own, and shorts stayed the drag.
+
+    LONG_ONLY: turns the signal solidly positive almost everywhere --
+    24 of 25 (st_period, st_multiplier) combinations tested were net
+    positive at vwap_lookback_days=20 alone. Extending vwap_lookback_days
+    to 40-70 with long_only on produces a genuine, wide plateau: every
+    cell across st_period {7,10} x st_multiplier {2.5,3.0,3.5} x
+    vwap_lookback_days {40,50,60,70} nets Rs 11,000-109,000. A finer grid
+    around the best point (st_period 8-13, vwap_lookback_days 42-58)
+    confirmed it's a real plateau, not a spike -- net P&L moves smoothly
+    (Rs 72,000-119,000) and max drawdown is pinned at the same -Rs 15,958
+    (the single worst trade) across the whole neighborhood -- no cliff
+    edges. st_period=12, st_multiplier=3.0, vwap_lookback_days=50 is the
+    best point in that plateau.
+
+    EMA/chop/narrow-CPR filters were all tried on top of this base and
+    REJECTED: ema_filter_period only ever matches or weakens the
+    unfiltered result (same at 20-45, drops to Rs 22,000-47,000 at
+    60+). chop and narrow-CPR each only remove 3-10 of the already-few
+    21 trades and move the result non-monotonically as their own
+    parameters vary (e.g. chop_lookback_days 10->15->20 at a fixed
+    efficiency bounces Rs 129,741 -> 92,906 -> 105,729) -- at this
+    sample size that bounce reads as noise, not a plateau, so neither
+    filter is trusted; both stay off.
+
+    Final: st_period=12, st_multiplier=3.0, vwap_lookback_days=50,
+    long_only=True -- 21 trades, net Rs 118,608.26, 61.9% win rate, max
+    drawdown -Rs 15,958.37 (net/drawdown ratio ~7.4, the best of any
+    strategy tuned in this codebase so far). Caveat: 21 trades over 11.7
+    years (~70-day average hold -- a genuine swing position, not a
+    scalp) is a small sample; trust the robustness of the PARAMETER
+    PLATEAU more than the exact P&L number, and treat this as a
+    promising, not yet fully battle-tested, result.
+    """
+    overrides.setdefault("st_period", 12)
+    overrides.setdefault("st_multiplier", 3.0)
+    overrides.setdefault("vwap_lookback_days", 50)
+    overrides.setdefault("long_only", True)
     return run(from_date, to_date, RELIANCE_EQUITY_KEY, **overrides)
 
 
