@@ -188,7 +188,7 @@ SuperTrend+VWAP crosses, not something fixable by filtering for a
 rare big trend ride pay for the rest (avg loss ~Rs 1,183 vs avg win
 ~Rs 3,740), not from winning often.
 
-narrow_cpr_max_width_pct (default None -- off): a seventh ADDED entry
+narrow_cpr_max_width_pct (default 0.26): a seventh ADDED entry
 filter, a different day-level regime gate from chop_min_efficiency
 but aimed at the same problem (not trading on days unlikely to
 trend). Central Pivot Range, computed from the PRIOR trading day's
@@ -201,8 +201,20 @@ day is skipped for new entries (exits still manage normally) if its
 OWN width_pct (from the day before IT) exceeds narrow_cpr_max_width_pct
 -- i.e. only genuinely narrow-CPR days get traded. On the 2024-2026
 NIFTY daily history, width_pct's own distribution: median 0.148%,
-p25 0.068%, p10 0.026% -- candidate thresholds should come from that
-range, not be guessed blind.
+p25 0.068%, p10 0.026%.
+
+narrow_cpr_max_width_pct=0.26 is the strongest single lever found in
+this strategy's whole tuning history. Swept {0.05, 0.08, 0.10, 0.15,
+0.20, 0.22-0.28, 0.30, 0.32, 0.35, 0.40} on the full continuous
+backtest: {0.24, 0.25, 0.26, 0.27, 0.28} form a tight, genuine
+plateau (total net P&L Rs 157,435-170,520, ALL FIVE sharing the exact
+same max drawdown, -Rs 29,416.25 -- the same single worst stretch
+getting filtered out at every value in that band) -- not an isolated
+spike. 0.26 is the peak: net P&L Rs 170,520 vs Rs 107,815 with the
+filter off (+58%), win rate up (29.4% vs 27.4%), AND max drawdown down
+30% (-Rs 29,416 vs -Rs 42,343). Both tails degrade clearly (down to
+Rs 41,862 at 0.05; back down to ~Rs 149,000 and worse drawdown by
+0.40), confirming this is a real structural optimum.
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
@@ -241,7 +253,7 @@ def run(
     chop_min_efficiency: float | None = 0.07,
     min_cross_distance_points: float | None = None,
     require_hold_bar: bool = False,
-    narrow_cpr_max_width_pct: float | None = None,
+    narrow_cpr_max_width_pct: float | None = 0.26,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)

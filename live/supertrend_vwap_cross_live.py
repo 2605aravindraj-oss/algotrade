@@ -29,10 +29,12 @@ SIGNAL/EXIT LOGIC: identical to backtest.supertrend_vwap_cross_options
 -- SuperTrend(ST_PERIOD, ST_MULTIPLIER) direction + a fresh VWAP cross
 on CANDLE_MINUTES futures bars, filtered by EMA_FILTER_PERIOD (only
 takes the signal if price is on the trend-confirming side of that
-EMA) and by the CHOP_LOOKBACK_DAYS/CHOP_MIN_EFFICIENCY day-level
+EMA), by the CHOP_LOOKBACK_DAYS/CHOP_MIN_EFFICIENCY day-level
 regime gate (no new entries at all on a day whose trailing INDEX
-trend efficiency is too low -- see that module's docstring for the
-full reasoning), triggers an ATM CE/PE buy; SL_PCT premium stop
+trend efficiency is too low), and by NARROW_CPR_MAX_WIDTH_PCT (no new
+entries if yesterday's Central Pivot Range was too wide -- see that
+module's docstring for the full reasoning on both), triggers an ATM
+CE/PE buy; SL_PCT premium stop
 (checked first), fixed profit target (TARGET_PCT, off by design --
 see that module's docstring for why), SuperTrend reversal, or
 forced-flat at FORCE_FLAT_TIME closes it. VWAP resets at every day
@@ -83,6 +85,7 @@ TARGET_PCT = None  # deliberately off -- see backtest module's docstring
 EMA_FILTER_PERIOD = 45
 CHOP_LOOKBACK_DAYS = 15
 CHOP_MIN_EFFICIENCY = 0.07
+NARROW_CPR_MAX_WIDTH_PCT = 0.26
 WARMUP_DAYS = 7
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -141,6 +144,28 @@ def _is_chop_day() -> bool:
     return efficiency < CHOP_MIN_EFFICIENCY
 
 
+def _is_wide_cpr_day() -> bool:
+    """Same Central Pivot Range gate as backtest.supertrend_vwap_cross_
+    options's narrow_cpr_max_width_pct: pivot/BC/TC from YESTERDAY's
+    own index H/L/C (no lookahead)."""
+    today = date.today()
+    days = upstox_client.get_daily_history(
+        UNDERLYING_KEY,
+        (today - timedelta(days=10)).isoformat(),
+        (today - timedelta(days=1)).isoformat(),
+    )
+    days.sort(key=lambda d: d["date"])
+    if not days:
+        return False
+    prev = days[-1]
+    h, l, c = prev["high"], prev["low"], prev["close"]
+    pivot = (h + l + c) / 3
+    bc = (h + l) / 2
+    tc = 2 * pivot - bc
+    width_pct = abs(tc - bc) / c * 100 if c else 0.0
+    return width_pct > NARROW_CPR_MAX_WIDTH_PCT
+
+
 def check_today() -> dict:
     """One-shot snapshot: today's SuperTrend/VWAP state, trades closed
     today so far, and the current open position (if any). Read-only,
@@ -155,6 +180,7 @@ def check_today() -> dict:
     chop_today = (
         _is_chop_day() if CHOP_LOOKBACK_DAYS is not None and CHOP_MIN_EFFICIENCY is not None else False
     )
+    wide_cpr_today = _is_wide_cpr_day() if NARROW_CPR_MAX_WIDTH_PCT is not None else False
 
     today_str = date.today().isoformat()
     today_idx = [i for i, b in enumerate(bars) if b[0][:10] == today_str]
@@ -236,7 +262,7 @@ def check_today() -> dict:
                 _close("trend_reverse")
 
         if (position is None and vwap is not None and prev_vwap is not None and prev_close is not None
-                and st_dir[i] is not None and not chop_today):
+                and st_dir[i] is not None and not chop_today and not wide_cpr_today):
             crossed_above = prev_close <= prev_vwap and c > vwap
             crossed_below = prev_close >= prev_vwap and c < vwap
             direction_label = None
@@ -277,6 +303,7 @@ def check_today() -> dict:
         "supertrend_dir": "bullish" if st_dir[last_i] == 1 else "bearish" if st_dir[last_i] == -1 else "unknown",
         "vwap": vwap,
         "chop_today": chop_today,
+        "wide_cpr_today": wide_cpr_today,
         "closed_trades": trades,
         "open_position": position,
     }
@@ -292,6 +319,8 @@ def main() -> None:
           f"vwap={r['vwap']:.2f}  supertrend={r['supertrend_dir']}")
     if r["chop_today"]:
         print("CHOP FILTER: market regime is choppy -- no new entries will be taken today.")
+    if r["wide_cpr_today"]:
+        print("CPR FILTER: yesterday's Central Pivot Range was too wide -- no new entries will be taken today.")
     if not r["closed_trades"] and not r["open_position"]:
         print("\nNo entries yet today.")
     for t in r["closed_trades"]:
