@@ -38,8 +38,11 @@ POSITION SIZE: `quantity` shares (default 100, a round number giving
 roughly the same notional scale as this codebase's other backtests'
 1-lot positions for a mid-priced large-cap stock -- NOT a
 recommendation, just a consistent sizing convention). LONG and SHORT
-both modeled (intraday MIS short-selling is standard for F&O-enabled
-stocks, which every NIFTY 50 constituent is). P&L/costs reuse
+both modeled by default (intraday MIS short-selling is standard for
+F&O-enabled stocks, which every NIFTY 50 constituent is);
+long_only=True (default False) drops every SHORT signal, taking only
+LONG entries -- added for a per-side tuning pass where the two sides
+clearly don't perform alike. P&L/costs reuse
 rsi2_reversion.Trade's futures-notional cost model as an
 approximation for intraday equity costs -- real equity intraday STT/
 stamp-duty rates differ slightly from F&O's, but are the same order
@@ -72,6 +75,7 @@ def run(
     chop_lookback_days: int | None = 15,
     chop_min_efficiency: float | None = 0.07,
     narrow_cpr_max_width_pct: float | None = 0.26,
+    long_only: bool = False,
     access_token: str | None = None,
 ) -> list[Trade]:
     trading_days = upstox_client.get_daily_history(instrument_key, from_date, to_date)
@@ -202,7 +206,7 @@ def run(
             direction_label = None
             if st_dir[i] == 1 and crossed_above:
                 direction_label = "LONG"
-            elif st_dir[i] == -1 and crossed_below:
+            elif st_dir[i] == -1 and crossed_below and not long_only:
                 direction_label = "SHORT"
 
             if direction_label is not None and ema_filter is not None:
