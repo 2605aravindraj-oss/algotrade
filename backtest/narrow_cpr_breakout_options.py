@@ -94,6 +94,7 @@ def run(
     target_pct: float | None = None,
     one_trade_per_day: bool = True,
     long_only: bool = False,
+    short_only: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -203,7 +204,7 @@ def run(
         if (position is None and cpr is not None and d in narrow_days and prev_close is not None
                 and expiry is not None and not (one_trade_per_day and traded_today)):
             direction_label = None
-            if prev_close <= cpr["tc"] and c > cpr["tc"]:
+            if prev_close <= cpr["tc"] and c > cpr["tc"] and not short_only:
                 direction_label = "LONG"
             elif prev_close >= cpr["bc"] and c < cpr["bc"] and not long_only:
                 direction_label = "SHORT"
