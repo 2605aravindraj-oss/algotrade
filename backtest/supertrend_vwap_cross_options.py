@@ -174,6 +174,20 @@ candle_minutes later than an unheld entry would). If price has
 already snapped back by then, the pending signal is discarded with no
 trade and no re-arm until a genuinely fresh cross occurs.
 
+Tested True on the full continuous backtest: it DOES cut the
+stop-loss share further (58.1% vs ~66% unfiltered) and nudges win
+rate up slightly (27.4% -> 27.8%), but net P&L drops 30% (Rs 107,815
+-> Rs 75,208) and max drawdown gets WORSE (-Rs 42,343 -> -Rs 47,736).
+Waiting one bar for confirmation means entering after the move has
+already started, missing the best part of the real trend rides that
+pay for everything else. Net loss, not a win -- stays False by
+design. Between this and min_cross_distance_points, the ~60-68%
+stop-loss rate looks like a structural feature of 5-minute
+SuperTrend+VWAP crosses, not something fixable by filtering for a
+"better" cross: the edge here comes from losing small and letting a
+rare big trend ride pay for the rest (avg loss ~Rs 1,183 vs avg win
+~Rs 3,740), not from winning often.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
