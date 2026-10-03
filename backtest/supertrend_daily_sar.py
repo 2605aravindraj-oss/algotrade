@@ -22,6 +22,11 @@ at that day's close. A position carries indefinitely across trading
 days (no forced-flat, like every other daily-bar module in this
 codebase) until the next opposite flip or the data ends.
 
+long_only=True (default False) drops the SHORT leg: a bearish flip
+still exits any open long, but goes FLAT instead of entering short,
+and only a bullish flip opens a new position. Not "stop-and-reverse"
+anymore in that case -- stop-and-go-flat.
+
 COSTS: reuses backtest.rsi2_reversion's futures-notional cost
 approximation, same caveat as every other daily-bar module here.
 """
@@ -39,6 +44,7 @@ def run(
     quantity: int = 100,
     period: int = 10,
     multiplier: float = 3.0,
+    long_only: bool = False,
 ) -> list[Trade]:
     days = _get_daily_history_chunked(instrument_key, from_date, to_date)
     days.sort(key=lambda d: d["date"])
@@ -66,9 +72,12 @@ def run(
 
         if prev_dir is not None and dirn != prev_dir:
             if position is not None:
-                _close(position, d, c, "reverse")
-            new_direction = "LONG" if dirn == 1 else "SHORT"
-            position = Trade(date=d, direction=new_direction, entry_time=d, entry_price=c, lot_size=quantity)
+                _close(position, d, c, "reverse" if not long_only else "flip_flat")
+                position = None
+            if dirn == 1:
+                position = Trade(date=d, direction="LONG", entry_time=d, entry_price=c, lot_size=quantity)
+            elif not long_only:
+                position = Trade(date=d, direction="SHORT", entry_time=d, entry_price=c, lot_size=quantity)
 
         prev_dir = dirn
 
