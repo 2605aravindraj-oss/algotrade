@@ -14,6 +14,13 @@ Strategies That Work"), adapted for intraday scalping and both directions:
 
 This trades the underlying directly (index or stock), not options -- P&L
 is reported in points and in rupees at a configurable lot size.
+
+bar_minutes (default 1) resamples the underlying 1-minute candles into
+bar_minutes-wide OHLCV bars (standard aggregation: first open, max high,
+min low, last close, summed volume) before computing RSI and VWAP and
+running the day's loop -- everything else (the VWAP regime filter, the
+exit rules, forced-flat) is unchanged, just evaluated on coarser bars.
+See run_reliance_5min for a re-tuned, 5-minute-bar config on Reliance.
 """
 from __future__ import annotations
 
@@ -124,6 +131,35 @@ def compute_rsi(closes: list[float], period: int = 2) -> list[float | None]:
     return rsi
 
 
+def _resample(rows_1min: list[list], bar_minutes: int) -> list[list]:
+    """Aggregate 1-minute candles into bar_minutes-wide candles aligned to
+    the 09:15 session open, within a single day's rows. Standard OHLCV
+    resampling: first open, max high, min low, last close, summed volume."""
+    if bar_minutes <= 1:
+        return rows_1min
+    buckets: dict[str, list] = {}
+    order: list[str] = []
+    for row in rows_1min:
+        ts, o, h, l, c, v, oi = row
+        hh, mm = int(ts[11:13]), int(ts[14:16])
+        minutes_since_open = (hh * 60 + mm) - (9 * 60 + 15)
+        bucket_idx = max(minutes_since_open, 0) // bar_minutes
+        bucket_start_minutes = 9 * 60 + 15 + bucket_idx * bar_minutes
+        bh, bm = divmod(bucket_start_minutes, 60)
+        bucket_ts = f"{ts[:11]}{bh:02d}:{bm:02d}:00{ts[19:]}"
+        if bucket_ts not in buckets:
+            buckets[bucket_ts] = [o, h, l, c, v, oi]
+            order.append(bucket_ts)
+        else:
+            b = buckets[bucket_ts]
+            b[1] = max(b[1], h)
+            b[2] = min(b[2], l)
+            b[3] = c
+            b[4] += v
+            b[5] = oi
+    return [[ts] + buckets[ts] for ts in order]
+
+
 def _session_vwap(rows: list[list]) -> list[float]:
     cum_vol = 0.0
     cum_pv = 0.0
@@ -149,6 +185,7 @@ def run(
     lot_size: int = 65,
     allow_short: bool = True,
     entry_cutoff: str = "15:00",
+    bar_minutes: int = 1,
 ) -> list[Trade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trades: list[Trade] = []
@@ -156,7 +193,8 @@ def run(
     for day in trading_days:
         d = day["date"]
         candles = cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False)
-        rows = sorted(candles, key=lambda c: c[0])
+        rows_1min = sorted(candles, key=lambda c: c[0])
+        rows = _resample(rows_1min, bar_minutes)
         if len(rows) < rsi_period + 5:
             continue
 
