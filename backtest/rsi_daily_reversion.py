@@ -40,10 +40,32 @@ codebase.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from data_sources import upstox_client
 from backtest.rsi2_reversion import Trade, compute_rsi
+
+_MAX_CHUNK_DAYS = 365 * 8  # the daily historical-candle endpoint rejects spans beyond ~9-10 years
+
+
+def _get_daily_history_chunked(instrument_key: str, from_date: str, to_date: str) -> list[dict]:
+    """upstox_client.get_daily_history errors (400) on a span much
+    beyond ~9-10 years -- a daily RSI strategy needs more history than
+    that for a meaningful sample, so fetch in <=8-year chunks and
+    concatenate (deduping by date, in case chunk boundaries overlap)."""
+    start = datetime.strptime(from_date, "%Y-%m-%d")
+    end = datetime.strptime(to_date, "%Y-%m-%d")
+    by_date: dict[str, dict] = {}
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=_MAX_CHUNK_DAYS), end)
+        chunk = upstox_client.get_daily_history(
+            instrument_key, chunk_start.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
+        )
+        for d in chunk:
+            by_date[d["date"]] = d
+        chunk_start = chunk_end + timedelta(days=1)
+    return list(by_date.values())
 
 
 def run(
@@ -58,7 +80,7 @@ def run(
     quantity: int = 100,
     allow_short: bool = False,
 ) -> list[Trade]:
-    days = upstox_client.get_daily_history(instrument_key, from_date, to_date)
+    days = _get_daily_history_chunked(instrument_key, from_date, to_date)
     days.sort(key=lambda d: d["date"])
     if len(days) < rsi_period + 5:
         return []
