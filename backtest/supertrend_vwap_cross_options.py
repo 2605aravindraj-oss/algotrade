@@ -188,6 +188,22 @@ SuperTrend+VWAP crosses, not something fixable by filtering for a
 rare big trend ride pay for the rest (avg loss ~Rs 1,183 vs avg win
 ~Rs 3,740), not from winning often.
 
+narrow_cpr_max_width_pct (default None -- off): a seventh ADDED entry
+filter, a different day-level regime gate from chop_min_efficiency
+but aimed at the same problem (not trading on days unlikely to
+trend). Central Pivot Range, computed from the PRIOR trading day's
+index H/L/C (no lookahead): pivot=(H+L+C)/3, BC=(H+L)/2,
+TC=2*pivot-BC, width_pct=|TC-BC|/C*100. A narrow CPR (the pivot
+range from yesterday's range was tight) is a common technical-
+analysis heuristic for "today is more likely to trend"; a wide one
+suggests more of yesterday's indecision carrying over. When set, a
+day is skipped for new entries (exits still manage normally) if its
+OWN width_pct (from the day before IT) exceeds narrow_cpr_max_width_pct
+-- i.e. only genuinely narrow-CPR days get traded. On the 2024-2026
+NIFTY daily history, width_pct's own distribution: median 0.148%,
+p25 0.068%, p10 0.026% -- candidate thresholds should come from that
+range, not be guessed blind.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -225,6 +241,7 @@ def run(
     chop_min_efficiency: float | None = 0.07,
     min_cross_distance_points: float | None = None,
     require_hold_bar: bool = False,
+    narrow_cpr_max_width_pct: float | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -252,6 +269,27 @@ def run(
             efficiency = net_move / abs_moves if abs_moves > 0 else 0.0
             if efficiency < chop_min_efficiency:
                 chop_skip_days.add(d)
+
+    narrow_cpr_skip_days: set[str] = set()
+    if narrow_cpr_max_width_pct is not None:
+        cpr_warmup_from = (datetime.strptime(from_date, "%Y-%m-%d") - timedelta(days=10)).strftime("%Y-%m-%d")
+        cpr_days = upstox_client.get_daily_history(underlying_key, cpr_warmup_from, to_date)
+        cpr_days.sort(key=lambda d: d["date"])
+        cpr_by_date = {d["date"]: d for d in cpr_days}
+        cpr_dates = sorted(cpr_by_date)
+        for day in trading_days:
+            d = day["date"]
+            idx = cpr_dates.index(d)
+            if idx < 1:
+                continue
+            prev = cpr_by_date[cpr_dates[idx - 1]]
+            h, l, c = prev["high"], prev["low"], prev["close"]
+            pivot = (h + l + c) / 3
+            bc = (h + l) / 2
+            tc = 2 * pivot - bc
+            width_pct = abs(tc - bc) / c * 100 if c else 0.0
+            if width_pct > narrow_cpr_max_width_pct:
+                narrow_cpr_skip_days.add(d)
 
     live_futures_cache: dict | None = None
 
@@ -393,7 +431,8 @@ def run(
             pending_signal = None
 
         if (position is None and vwap is not None and prev_vwap is not None and prev_close is not None
-                and st_dir[i] is not None and expiry is not None and d not in chop_skip_days):
+                and st_dir[i] is not None and expiry is not None and d not in chop_skip_days
+                and d not in narrow_cpr_skip_days):
             crossed_above = prev_close <= prev_vwap and c > vwap
             crossed_below = prev_close >= prev_vwap and c < vwap
             direction_label = None
