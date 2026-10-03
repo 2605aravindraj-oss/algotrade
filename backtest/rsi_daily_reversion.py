@@ -23,11 +23,16 @@ rule also requires price above a long SMA before taking the long
 side; that is NOT included here, and would be a natural next
 parameter to sweep if the bare version shows promise.)
 
-EXIT (checked in this order): stop_loss_pct (if set) -> RSI crosses
-back through exit_threshold (LONG: RSI > exit_threshold; SHORT:
-RSI < 100 - exit_threshold) -> max_hold_days (if set, calendar days
-since entry, not trading days). No forced-flat -- a position can
-carry indefinitely until one of these fires or the data ends.
+EXIT (checked in this order): stop_loss_pct (if set) -> target_pct
+(if set, a fixed profit target as a percentage of entry price,
+checked before the RSI exit so it can lock in a move RSI hasn't
+caught up to yet) -> RSI crosses back through exit_threshold (LONG:
+RSI > exit_threshold; SHORT: RSI < 100 - exit_threshold) ->
+max_hold_days (if set, calendar days since entry, not trading days).
+No forced-flat -- a position can carry indefinitely until one of
+these fires or the data ends. Both stop_loss_pct and target_pct
+default to None (off) -- the tuned Reliance config relies on the
+RSI exit alone; see run_reliance_tuned's docstring for why.
 
 COSTS: reuses backtest.rsi2_reversion's futures-notional cost
 approximation (flat brokerage + ~0.0255% of notional round trip) as
@@ -76,6 +81,7 @@ def run(
     oversold: float = 30,
     exit_threshold: float = 50,
     stop_loss_pct: float | None = None,
+    target_pct: float | None = None,
     max_hold_days: int | None = None,
     quantity: int = 100,
     allow_short: bool = False,
@@ -107,6 +113,13 @@ def run(
                 )
                 if hit_sl:
                     exit_reason = "stop_loss"
+            if exit_reason is None and target_pct is not None:
+                hit_target = (
+                    (is_long and price >= position.entry_price * (1 + target_pct / 100))
+                    or (not is_long and price <= position.entry_price * (1 - target_pct / 100))
+                )
+                if hit_target:
+                    exit_reason = "target"
             if exit_reason is None:
                 if is_long and rsi[i] > exit_threshold:
                     exit_reason = "rsi_exit"
