@@ -161,6 +161,19 @@ least min_cross_distance_points away from VWAP at the signal bar
 filter) -- same bar, same entry timing, just a higher bar for what
 counts as a real cross.
 
+require_hold_bar (default False): a sixth ADDED entry filter, testing
+persistence instead of magnitude (min_cross_distance_points tests
+magnitude and, swept 5-50 points, left the stop-loss SHARE of trades
+basically unchanged at 59-66% vs the unfiltered 68%, while collapsing
+trade count and usually net P&L too -- a cross's SIZE isn't what
+predicts whether it holds). When True, a fresh cross no longer enters
+immediately: it's held as a pending signal, and only becomes a real
+entry if price is STILL on the correct side of VWAP one bar later
+(entering at that next bar's own decision-time-correct fill, one
+candle_minutes later than an unheld entry would). If price has
+already snapped back by then, the pending signal is discarded with no
+trade and no re-arm until a genuinely fresh cross occurs.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -197,6 +210,7 @@ def run(
     chop_lookback_days: int | None = 15,
     chop_min_efficiency: float | None = 0.07,
     min_cross_distance_points: float | None = None,
+    require_hold_bar: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -278,6 +292,7 @@ def run(
 
     trades: list[OptionTrade] = []
     position = None  # dict: direction, entry_time, entry_price, strike, expiry, lot_size, opt_type, date
+    pending_signal = None  # dict: direction, atm, opt_type -- a cross awaiting one more bar's confirmation
     current_day: str | None = None
     cum_pv = cum_vol = 0.0
     prev_close = prev_vwap = None
@@ -290,6 +305,7 @@ def run(
         if d != current_day:
             current_day = d
             position = None
+            pending_signal = None
             cum_pv = cum_vol = 0.0
             prev_close = prev_vwap = None
 
@@ -320,6 +336,7 @@ def run(
         if time_str >= FORCE_FLAT_TIME:
             if position is not None:
                 _close("eod")
+            pending_signal = None
             prev_close, prev_vwap = c, vwap
             continue
 
@@ -342,6 +359,24 @@ def run(
                 _close("target")
             elif hit_reversal:
                 _close("trend_reverse")
+
+        if position is None and pending_signal is not None and vwap is not None:
+            still_valid = (
+                (pending_signal["direction"] == "LONG" and c > vwap)
+                or (pending_signal["direction"] == "SHORT" and c < vwap)
+            )
+            if still_valid:
+                opt_type = pending_signal["opt_type"]
+                contract, candles = _atm_option_candles(pending_signal["atm"], opt_type, d, expiry)
+                if contract is not None and candles:
+                    bar = _fill(candles, decision_time_str)
+                    if bar is not None:
+                        position = {
+                            "direction": pending_signal["direction"], "entry_time": bar[0], "entry_price": bar[4],
+                            "strike": contract["strike_price"], "expiry": expiry,
+                            "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
+                        }
+            pending_signal = None
 
         if (position is None and vwap is not None and prev_vwap is not None and prev_close is not None
                 and st_dir[i] is not None and expiry is not None and d not in chop_skip_days):
@@ -368,15 +403,18 @@ def run(
 
             if direction_label is not None:
                 opt_type = "CE" if direction_label == "LONG" else "PE"
-                contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
-                if contract is not None and candles:
-                    bar = _fill(candles, decision_time_str)
-                    if bar is not None:
-                        position = {
-                            "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
-                            "strike": contract["strike_price"], "expiry": expiry,
-                            "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
-                        }
+                if require_hold_bar:
+                    pending_signal = {"direction": direction_label, "atm": atm, "opt_type": opt_type}
+                else:
+                    contract, candles = _atm_option_candles(atm, opt_type, d, expiry)
+                    if contract is not None and candles:
+                        bar = _fill(candles, decision_time_str)
+                        if bar is not None:
+                            position = {
+                                "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                                "strike": contract["strike_price"], "expiry": expiry,
+                                "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
+                            }
 
         prev_close, prev_vwap = c, vwap
 
