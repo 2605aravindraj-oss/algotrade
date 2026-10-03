@@ -30,9 +30,10 @@ caught up to yet) -> RSI crosses back through exit_threshold (LONG:
 RSI > exit_threshold; SHORT: RSI < 100 - exit_threshold) ->
 max_hold_days (if set, calendar days since entry, not trading days).
 No forced-flat -- a position can carry indefinitely until one of
-these fires or the data ends. Both stop_loss_pct and target_pct
-default to None (off) -- the tuned Reliance config relies on the
-RSI exit alone; see run_reliance_tuned's docstring for why.
+these fires or the data ends. stop_loss_pct, target_pct and
+max_hold_days all default to None (off) -- the tuned Reliance config
+relies on the RSI exit alone; see run_reliance_tuned's docstring for
+why all three were tried and rejected.
 
 COSTS: reuses backtest.rsi2_reversion's futures-notional cost
 approximation (flat brokerage + ~0.0255% of notional round trip) as
@@ -169,17 +170,18 @@ def run_reliance_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]
     drawdown -Rs 8,916 (equal to the single worst trade -- there was
     never a losing STREAK, just isolated losses). exit_threshold=50
     was independently confirmed best in its own 1D sweep at this
-    period/oversold (vs 40-70). stop_loss_pct and max_hold_days were
-    not swept -- left at their defaults (off) since the unfiltered
-    result was already strong.
+    period/oversold (vs 40-70). stop_loss_pct, target_pct and
+    max_hold_days were not swept yet at the time -- left at their
+    defaults (off) since the unfiltered result was already strong.
+    All three were swept later; see below -- all three stay off.
 
-    stop_loss_pct and target_pct were later swept too (both off by
-    design -- here's why). stop_loss_pct in {2,3,4,5,7,10,15}: every
-    value made max drawdown dramatically WORSE (-Rs 21,000 to -Rs
-    32,000+, vs the unfiltered -Rs 8,916) for flat-to-negative net
-    P&L -- a tight stop on a mean-reversion dip just converts a trade
-    that would have recovered into a realized loss, and cranks trade
-    count up (47-79 vs 42) without adding edge. target_pct in
+    stop_loss_pct and target_pct (both off by design -- here's why).
+    stop_loss_pct in {2,3,4,5,7,10,15}: every value made max drawdown
+    dramatically WORSE (-Rs 21,000 to -Rs 32,000+, vs the unfiltered
+    -Rs 8,916) for flat-to-negative net P&L -- a tight stop on a
+    mean-reversion dip just converts a trade that would have
+    recovered into a realized loss, and cranks trade count up
+    (47-79 vs 42) without adding edge. target_pct in
     {3,3.5,4,4.5,5,5.5,6,6.5,7,10,15,20}: net P&L is flat at baseline
     (Rs 101,263) for every value except a single spike at exactly 5
     (Rs 106,590). That spike is NOT a genuine plateau -- target=4.5
@@ -191,7 +193,26 @@ def run_reliance_tuned(from_date: str, to_date: str, **overrides) -> list[Trade]
     baseline never takes, not a repeatable structural edge. Rejected
     for the same reason min_cross_distance_points/require_hold_bar
     were rejected in the NIFTY options module -- isolated spike, not
-    a plateau. Both parameters stay off.
+    a plateau.
+
+    max_hold_days (also off by design). Swept {5,7,10,15,20,25,30,
+    40,50,60,90} plus a finer {16..24} grid around an apparent bump
+    at 20: EVERY tested value from 5 to 24 makes max drawdown
+    substantially worse than the unfiltered -Rs 8,916 (ranging from
+    -Rs 13,700 at the mildest cap tried up to -Rs 32,000+ at the
+    tightest), while net P&L bounces around noisily above and below
+    baseline with no stable improvement (e.g. 103,649 at cap=20,
+    109,325 at cap=21, but 93,305 at cap=17 and 90,463 at cap=23 --
+    no plateau, just noise). Forcing an early exit on a still-open
+    position converts a trade that was heading toward recovery into
+    a smaller/negative realized one, the same mechanism that makes
+    stop_loss_pct harmful here. Values >=40 converge back toward the
+    unfiltered baseline as fewer trades get capped at all (0 capped
+    at 90, exactly matching the unfiltered result) -- consistent with
+    the cap simply doing damage whenever it actually binds, never
+    adding value. All three of stop_loss_pct, target_pct and
+    max_hold_days stay off; this strategy works because its mean-
+    reversion exits are allowed to run their full course.
     """
     overrides.setdefault("rsi_period", 16)
     overrides.setdefault("oversold", 38)
