@@ -62,6 +62,7 @@ from dataclasses import dataclass
 
 from backtest.ema8_13_trend_sweep_options import _ema
 from backtest.rsi2_reversion import compute_rsi
+from backtest.rsi_daily_reversion import _get_daily_history_chunked
 from backtest.technical_rating_rotation import (
     NIFTY_50,
     Period,
@@ -237,7 +238,7 @@ def _fetch_histories(symbols: list[str], from_date: str, to_date: str) -> dict[s
         if key is None:
             continue
         try:
-            daily = upstox_client.get_daily_history(key, from_date, to_date)
+            daily = _get_daily_history_chunked(key, from_date, to_date)
         except Exception:
             continue
         if daily:
@@ -257,7 +258,7 @@ def run(
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=380)).isoformat()
 
     histories = _fetch_histories(symbols, warmup_from, end_date)
-    nifty_candles_all = sorted(upstox_client.get_daily_history(NIFTY_INDEX_KEY, warmup_from, end_date), key=lambda c: c["date"])
+    nifty_candles_all = sorted(_get_daily_history_chunked(NIFTY_INDEX_KEY, warmup_from, end_date), key=lambda c: c["date"])
 
     calendar_symbol = "RELIANCE" if "RELIANCE" in histories else next(iter(histories))
     all_dates = sorted({c["date"] for c in histories[calendar_symbol]})
