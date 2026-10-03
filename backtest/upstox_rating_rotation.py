@@ -274,6 +274,16 @@ def _fetch_histories(symbols: list[str], from_date: str, to_date: str) -> dict[s
     return out
 
 
+def _trading_day_rebalance_dates(trading_dates: list[str], rebalance_days: int) -> list[str]:
+    """Step by rebalance_days actual TRADING days (index into trading_dates
+    directly), not calendar days -- "every 30 trading days" literally,
+    plus a final close-out on the last available trading day."""
+    dates = trading_dates[0::rebalance_days]
+    if dates[-1] != trading_dates[-1]:
+        dates.append(trading_dates[-1])
+    return dates
+
+
 def run(
     start_date: str,
     end_date: str,
@@ -282,6 +292,7 @@ def run(
     top_n: int = 5,
     symbols: list[str] | None = None,
     rs_require_all: bool = True,
+    calendar_rebalance: bool = False,
 ) -> RotationResult:
     symbols = symbols or NIFTY_50
     warmup_from = (datetime.date.fromisoformat(start_date) - datetime.timedelta(days=380)).isoformat()
@@ -295,7 +306,10 @@ def run(
     if not trading_dates:
         return RotationResult(starting_capital=starting_capital, final_value=starting_capital)
 
-    rb_dates = _rebalance_dates(trading_dates, start_date, end_date, rebalance_days)
+    if calendar_rebalance:
+        rb_dates = _rebalance_dates(trading_dates, start_date, end_date, rebalance_days)
+    else:
+        rb_dates = _trading_day_rebalance_dates(trading_dates, rebalance_days)
     if len(rb_dates) < 2:
         return RotationResult(starting_capital=starting_capital, final_value=starting_capital)
 
