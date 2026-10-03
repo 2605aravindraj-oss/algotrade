@@ -486,6 +486,55 @@ def run(
     return trades
 
 
+BANKNIFTY_UNDERLYING_KEY = "NSE_INDEX|Nifty Bank"
+
+
+def run_banknifty(from_date: str, to_date: str, access_token: str | None = None, **overrides) -> list[OptionTrade]:
+    """run() with Bank Nifty's own validated defaults, NOT the NIFTY
+    ones (strike_step=100 -- Bank Nifty's near-the-money strikes step
+    by 100, not NIFTY's 50). Every one of NIFTY's filters was
+    re-swept from scratch on the full continuous 2024-10-01/2026-09-08
+    Bank Nifty backtest rather than assumed to transfer, and most of
+    them DON'T transfer:
+      sl_pct=None -- every value from 0.10-0.40 underperformed the
+        bare "ride until reversal" baseline (Rs 100,394); only 0.50
+        (effectively a no-op) roughly tied it. A moderate stop cuts
+        Bank Nifty positions off before the real move develops more
+        often than it prevents a big loss -- the opposite of NIFTY.
+      ema_filter_period=None -- every period tested reduced net P&L
+        with only a drawdown trade-off, never dominating the
+        unfiltered baseline on both metrics the way ema=45 did for
+        NIFTY.
+      chop_lookback_days=None, chop_min_efficiency=None -- every
+        {15,20} x {0.05-0.20} combination tested badly underperformed
+        the unfiltered baseline (several went net negative). The
+        trend-efficiency regime read doesn't transfer to Bank Nifty's
+        price action.
+      narrow_cpr_max_width_pct=0.11 -- the one filter that DOES
+        transfer, at a different threshold than NIFTY's 0.26 (Bank
+        Nifty's own CPR-width distribution is wider: median 0.174%
+        vs NIFTY's 0.148%). Swept 0.05-0.50 then refined around the
+        peak: {0.09, 0.11, 0.115, 0.12} form a noisy but real
+        plateau (net P&L Rs 109,815-117,863, max drawdown -Rs
+        18,241 to -Rs 25,099), clearly above both a tighter filter
+        (0.05: Rs 63,832) and a looser one (0.20+: falling back
+        toward the unfiltered baseline). 0.11 is the best single
+        value by risk-adjusted return: net P&L Rs 117,863 (actually
+        ABOVE the Rs 100,394 unfiltered baseline) AND max drawdown
+        down 76% (-Rs 18,241 vs -Rs 74,753), net/drawdown ratio 6.46
+        vs the next-best region's (0.17-0.18, higher absolute P&L
+        around Rs 128,000 but -Rs 44,000 drawdown) ratio of ~2.9.
+    """
+    overrides.setdefault("underlying_key", BANKNIFTY_UNDERLYING_KEY)
+    overrides.setdefault("strike_step", 100)
+    overrides.setdefault("sl_pct", None)
+    overrides.setdefault("ema_filter_period", None)
+    overrides.setdefault("chop_lookback_days", None)
+    overrides.setdefault("chop_min_efficiency", None)
+    overrides.setdefault("narrow_cpr_max_width_pct", 0.11)
+    return run(from_date, to_date, access_token=access_token, **overrides)
+
+
 def summary(trades: list[OptionTrade]) -> str:
     from backtest.macd_rsi2_momentum_options import summary as _summary
     return _summary(trades)
