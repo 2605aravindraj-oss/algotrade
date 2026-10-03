@@ -27,10 +27,12 @@ data sources as the other live/ tools instead:
 
 SIGNAL/EXIT LOGIC: identical to backtest.supertrend_vwap_cross_options
 -- SuperTrend(ST_PERIOD, ST_MULTIPLIER) direction + a fresh VWAP cross
-on CANDLE_MINUTES futures bars triggers an ATM CE/PE buy; SL_PCT
-premium stop (checked first), fixed profit target (TARGET_PCT, off by
-design -- see that module's docstring for why), SuperTrend reversal,
-or forced-flat at FORCE_FLAT_TIME closes it. VWAP resets at every day
+on CANDLE_MINUTES futures bars, filtered by EMA_FILTER_PERIOD (only
+takes the signal if price is on the trend-confirming side of that
+EMA), triggers an ATM CE/PE buy; SL_PCT premium stop (checked first),
+fixed profit target (TARGET_PCT, off by design -- see that module's
+docstring for why), SuperTrend reversal, or forced-flat at
+FORCE_FLAT_TIME closes it. VWAP resets at every day
 boundary; SuperTrend is computed over the full warmup+today series
 (it needs the continuity) but the day's trading -- entries, the open
 position, VWAP -- is simulated starting fresh at today's first bar
@@ -65,6 +67,7 @@ from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_
 from backtest.sweep_reclaim_breakout import _resample
 from backtest.supertrend_pivot_options import _compute_supertrend_line
 from backtest.fixed_volume_profile_options import _resolve_current_month_futures
+from backtest.ema8_13_trend_sweep_options import _ema
 from live.synthetic_straddle_today import _load_nifty_weekly_chain, _nearest_unexpired_expiry, _contract_for_strike
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
@@ -74,6 +77,7 @@ ST_PERIOD = 10
 ST_MULTIPLIER = 3.0
 SL_PCT = 0.10
 TARGET_PCT = None  # deliberately off -- see backtest module's docstring
+EMA_FILTER_PERIOD = 45
 WARMUP_DAYS = 7
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -121,6 +125,7 @@ def check_today() -> dict:
                           "try again once the market has been open a while, or check back on a trading day"}
 
     st_dir, _st_line = _compute_supertrend_line(bars, ST_PERIOD, ST_MULTIPLIER)
+    ema_filter = _ema([b[4] for b in bars], EMA_FILTER_PERIOD) if EMA_FILTER_PERIOD else None
 
     today_str = date.today().isoformat()
     today_idx = [i for i, b in enumerate(bars) if b[0][:10] == today_str]
@@ -209,6 +214,15 @@ def check_today() -> dict:
                 direction_label = "LONG"
             elif st_dir[i] == -1 and crossed_below:
                 direction_label = "SHORT"
+
+            if direction_label is not None and ema_filter is not None:
+                ema_val = ema_filter[i]
+                if ema_val is None:
+                    direction_label = None
+                elif direction_label == "LONG" and c <= ema_val:
+                    direction_label = None
+                elif direction_label == "SHORT" and c >= ema_val:
+                    direction_label = None
 
             if direction_label is not None:
                 opt_type = "CE" if direction_label == "LONG" else "PE"

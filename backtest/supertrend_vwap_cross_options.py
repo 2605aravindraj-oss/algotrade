@@ -82,7 +82,7 @@ fraction of their eventual move, trimming the tail that carries the
 whole P&L. Conclusion: do not enable target_pct here -- it stays
 None by design, not merely by default.
 
-ema_filter_period (default None): a third ADDED entry filter, on top
+ema_filter_period (default 45): a third ADDED entry filter, on top
 of the SuperTrend+VWAP cross signal -- when set, an EMA(ema_filter_
 period) is computed over the full continuous futures close series
 (not reset daily, same continuity as SuperTrend, since a trend filter
@@ -93,6 +93,19 @@ longer-term trend, which this strategy's whipsaw losses in chop
 suggest are disproportionately the losing ones. Not part of the
 original sourced spec -- ema_filter_period=None takes every signal,
 unfiltered, exactly as before.
+
+ema_filter_period=45 was chosen by sweeping {20, 28, 34, 40, 45, 50,
+60, 70, 100, 150, 200} on all 4 established windows. Periods 40-60
+form a genuine wide plateau (total net P&L Rs 57,526-64,231), well
+above both the shorter end (20: Rs 19,378; 34: Rs 51,032) and the
+longer end (100+: falling to Rs 1,617 by 200) -- a real structural
+optimum, not an isolated spike. Within that plateau, 45 is the
+best-balanced value: the highest total net P&L of any value tested
+(Rs 63,830 vs Rs 42,978 with no filter, +48%) AND the best worst-case
+single-window drawdown of any value tested (-Rs 27,334 vs -Rs 30,888
+baseline). It improves net P&L in 3 of 4 windows and drawdown in 3 of
+4 windows (the exception each time, 2025-05-01/2025-09-01, is only
+modestly worse on the metric it misses).
 
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
@@ -124,7 +137,7 @@ def run(
     st_multiplier: float = 3.0,
     sl_pct: float | None = 0.10,
     target_pct: float | None = None,
-    ema_filter_period: int | None = None,
+    ema_filter_period: int | None = 45,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
