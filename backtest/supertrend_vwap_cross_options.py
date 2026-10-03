@@ -82,6 +82,18 @@ fraction of their eventual move, trimming the tail that carries the
 whole P&L. Conclusion: do not enable target_pct here -- it stays
 None by design, not merely by default.
 
+ema_filter_period (default None): a third ADDED entry filter, on top
+of the SuperTrend+VWAP cross signal -- when set, an EMA(ema_filter_
+period) is computed over the full continuous futures close series
+(not reset daily, same continuity as SuperTrend, since a trend filter
+needs to see across day boundaries). A LONG signal is only taken if
+the futures close is ABOVE the EMA; a SHORT signal only if it's
+BELOW. The idea: filter out VWAP crosses that go against the
+longer-term trend, which this strategy's whipsaw losses in chop
+suggest are disproportionately the losing ones. Not part of the
+original sourced spec -- ema_filter_period=None takes every signal,
+unfiltered, exactly as before.
+
 Decision-time-correct fills (bucket start + candle_minutes), one
 position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
@@ -97,6 +109,7 @@ from backtest.macd_rsi2_momentum_options import OptionTrade
 from backtest.sweep_reclaim_breakout import _resample
 from backtest.supertrend_pivot_options import _compute_supertrend_line
 from backtest.fixed_volume_profile_options import _resolve_current_month_futures
+from backtest.ema8_13_trend_sweep_options import _ema
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
@@ -111,6 +124,7 @@ def run(
     st_multiplier: float = 3.0,
     sl_pct: float | None = 0.10,
     target_pct: float | None = None,
+    ema_filter_period: int | None = None,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -147,6 +161,7 @@ def run(
         return []
 
     st_dir, _st_line = _compute_supertrend_line(bars, st_period, st_multiplier)
+    ema_filter = _ema([b[4] for b in bars], ema_filter_period) if ema_filter_period else None
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
@@ -243,6 +258,15 @@ def run(
                 direction_label = "LONG"
             elif st_dir[i] == -1 and crossed_below:
                 direction_label = "SHORT"
+
+            if direction_label is not None and ema_filter is not None:
+                ema_val = ema_filter[i]
+                if ema_val is None:
+                    direction_label = None
+                elif direction_label == "LONG" and c <= ema_val:
+                    direction_label = None
+                elif direction_label == "SHORT" and c >= ema_val:
+                    direction_label = None
 
             if direction_label is not None:
                 opt_type = "CE" if direction_label == "LONG" else "PE"
