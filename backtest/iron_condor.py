@@ -12,6 +12,58 @@ to the day's 09:15 spot price.
 
 Requires an Upstox access token (expired-instruments API) since every
 expiry involved is, by the time this runs, in the past.
+
+TUNING (2024-10-03/2026-09-08, the full NIFTY expired-options window):
+default short_distance=150/wing_width=100 nets a LOSS (-Rs 16,674 on
+480 days, 57.3% win rate) once real costs are included -- the premium
+harvested isn't enough to cover Rs 215.77/day in STT/GST/exchange
+charges across 8 fills/day (4 legs x entry+exit). Sweeping
+short_distance x wing_width over {100,150,200,250,300} x
+{50,100,150,200} showed wider wings consistently help at every
+short_distance (cheaper protection legs keep more of the short
+premium); best in that grid: short_distance=200, wing_width=200 ->
+net Rs 58,096, max drawdown -Rs 25,562, 63.4% win rate.
+
+Pushed wing_width further (250/300/350 at short_distance=200) and
+deliberately did NOT chase the top of that extension: net P&L kept
+climbing sharply (Rs 99,709 -> 115,392 -> 143,558) while max drawdown
+stayed roughly flat (-27,112 -> -27,598 -> -27,863) -- the signature
+of a backtest sample that never saw a move extreme enough to test the
+protective wings. Past wing_width=200 the structure is quietly
+degenerating toward a naked short strangle that this 2-year sample
+can't fairly price (unbounded real-world tail risk the backtest
+can't see). short_distance=200/wing_width=200 is the chosen final
+config: the last point on the sweep where widening the wings showed
+genuine, demonstrated protection (drawdown improving alongside
+returns), not just a sample that got lucky on tail moves.
+
+SLIPPAGE SENSITIVITY (final config, short_distance=200/wing_width=200):
+the zero-friction backtest above assumes every leg fills at the exact
+observed 1-minute candle price. Real 4-leg multi-strike option fills
+pay a bid-ask spread on every leg, both entry and exit -- 8 fills/day
+for this structure. Sweeping slippage_pct (adverse execution applied
+directly to each leg's fill price, BUY higher/SELL lower, both legs
+of entry and exit):
+
+    slippage   net P&L      max drawdown   win rate
+    0.0%       Rs  58,096   -Rs  25,562    63.4%
+    0.5%       Rs   9,035   -Rs  31,025    61.3%
+    1.0%      -Rs  40,026   -Rs  54,569    58.7%
+    2.0%      -Rs 138,149   -Rs 145,356    53.3%
+    3.0%      -Rs 236,271   -Rs 240,107    48.0%
+    5.0%      -Rs 432,516   -Rs 432,807    39.6%
+
+The strategy FLIPS TO A NET LOSS at just 1% per-leg slippage, with
+max drawdown nearly doubling. Gross P&L barely moves with slippage
+(Rs 57,096 -> 58,806 at 1% -- slippage is directionally noisy around
+small per-leg prices); it's the COSTS that roughly double, because
+every one of the 8 daily fills now pays the spread on top of
+brokerage/STT/GST. This means the backtested edge here is thin
+enough to be a transaction-cost artifact rather than a robust one:
+whether this is actually tradeable depends entirely on achieving
+sub-0.5% effective slippage per leg in practice (tight, liquid
+strikes; limit orders; careful execution), which is a real execution
+risk this backtest's zero-friction numbers don't capture.
 """
 from __future__ import annotations
 
