@@ -276,6 +276,14 @@ from backtest.ema8_13_trend_sweep_options import _ema
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
 
+def _apply_slippage(price: float, side: str, slippage_pct: float) -> float:
+    """Adverse execution: a BUY fills slippage_pct higher, a SELL fills
+    slippage_pct lower, than the observed candle price."""
+    if slippage_pct <= 0:
+        return price
+    return price * (1 + slippage_pct) if side == "BUY" else price * (1 - slippage_pct)
+
+
 def run(
     from_date: str,
     to_date: str,
@@ -292,8 +300,16 @@ def run(
     min_cross_distance_points: float | None = None,
     require_hold_bar: bool = False,
     narrow_cpr_max_width_pct: float | None = 0.26,
+    slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    """slippage_pct: adverse execution applied directly to each fill's
+    realized price -- every trade here is BUY-to-open/SELL-to-close
+    (a long CE or a long PE, never a short leg), so the entry fill pays
+    slippage_pct MORE than the observed candle close and the exit fill
+    receives slippage_pct LESS. 0.0 (default) reproduces the exact
+    fills used everywhere else in this codebase.
+    """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if len(trading_days) < 1:
@@ -426,7 +442,7 @@ def run(
             nonlocal position
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
             bar = _fill(candles, decision_time_str) if candles else None
-            exit_price = bar[4] if bar else position["entry_price"]
+            exit_price = _apply_slippage(bar[4], "SELL", slippage_pct) if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
             trades.append(OptionTrade(
                 date=position["date"], direction=position["direction"], expiry=position["expiry"],
@@ -474,7 +490,8 @@ def run(
                     bar = _fill(candles, decision_time_str)
                     if bar is not None:
                         position = {
-                            "direction": pending_signal["direction"], "entry_time": bar[0], "entry_price": bar[4],
+                            "direction": pending_signal["direction"], "entry_time": bar[0],
+                            "entry_price": _apply_slippage(bar[4], "BUY", slippage_pct),
                             "strike": contract["strike_price"], "expiry": expiry,
                             "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
                         }
@@ -514,7 +531,8 @@ def run(
                         bar = _fill(candles, decision_time_str)
                         if bar is not None:
                             position = {
-                                "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                                "direction": direction_label, "entry_time": bar[0],
+                                "entry_price": _apply_slippage(bar[4], "BUY", slippage_pct),
                                 "strike": contract["strike_price"], "expiry": expiry,
                                 "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
                             }
