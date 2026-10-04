@@ -31,6 +31,14 @@ _LEG_SIDES = {
 }
 
 
+def _apply_slippage(price: float, side: str, slippage_pct: float) -> float:
+    """Adverse execution: a BUY fills slippage_pct higher, a SELL fills
+    slippage_pct lower, than the observed candle price."""
+    if slippage_pct <= 0:
+        return price
+    return price * (1 + slippage_pct) if side == "BUY" else price * (1 - slippage_pct)
+
+
 @dataclass
 class Leg:
     role: str  # short_call | short_put | long_call | long_put
@@ -71,6 +79,7 @@ def run(
     entry_time: str = "09:15",
     underlying_key: str = UNDERLYING_KEY,
     max_dte: int | None = None,
+    slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[DayResult]:
     """short_distance/wing_width are in points. If short_distance_strikes /
@@ -82,6 +91,14 @@ def run(
     the nearest expiry (skip the rest) -- useful for monthly-expiry
     underlyings (stocks) where "nearest expiry" is often weeks out and
     there's little theta to harvest most days.
+
+    slippage_pct: adverse per-leg execution slippage, applied directly to
+    each leg's realized fill price (not just an added fee) -- a BUY fill
+    pays slippage_pct MORE than the observed candle price, a SELL fill
+    receives slippage_pct LESS, on both entry and exit. 0.0 (default)
+    reproduces the exact fills used everywhere else in this codebase
+    (the observed 1-minute candle price, no execution friction beyond
+    backtest.costs' brokerage/STT/exchange charges).
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     expiries = sorted(
@@ -170,8 +187,9 @@ def run(
             if entry is None or exit_ is None:
                 incomplete = True
                 continue
-            leg.entry_price = entry[1]
-            leg.exit_price = exit_[1]
+            entry_side, exit_side = _LEG_SIDES[leg.role]
+            leg.entry_price = _apply_slippage(entry[1], entry_side, slippage_pct)
+            leg.exit_price = _apply_slippage(exit_[1], exit_side, slippage_pct)
 
         if incomplete or any(leg.entry_price is None or leg.exit_price is None for leg in legs):
             day_result.note = "missing leg candle data"
