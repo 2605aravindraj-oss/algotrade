@@ -259,6 +259,35 @@ position at a time, everything (VWAP accumulator, pending state)
 resets at every day boundary. Requires an Upstox access token
 (expired-instruments API, for both the futures leg on older dates and
 the option premiums).
+
+SLIPPAGE SENSITIVITY: unlike backtest/iron_condor.py (a 4-leg
+structure with 8 fills/day that flips to a net LOSS at just 1%
+per-leg slippage), this strategy is a single long option per trade
+(buy to open, sell to close -- 2 fills per trade, ~1 trade/day over
+this window) and stays profitable much further out:
+
+    slippage   net P&L        max drawdown
+    0.0%       Rs  163,227    -Rs  29,416
+    0.5%       Rs  128,912    -Rs  32,206
+    1.0%       Rs   98,785    -Rs  34,116
+    1.5%       Rs   64,257    -Rs  36,614
+    2.0%       Rs   28,885    -Rs  43,321   (still positive)
+    3.0%      -Rs   41,947    -Rs  73,512   (flips to a loss)
+    5.0%     -Rs  227,131    -Rs  245,763
+
+Stays net positive through 2% per-leg slippage -- a far more extreme
+assumption than real bid-ask spreads on liquid ATM NIFTY weekly
+options -- and only breaks down at 3%+. The far-fewer-fills structure
+(2/trade vs the iron condor's 8/day) is the direct reason this edge
+is structurally more robust to execution friction, not a difference
+in the underlying signal quality. (Trade count rises slightly with
+slippage -- 479 at 0% to 530 at 5% -- because sl_pct is checked
+against the ACTUAL slippage-inflated entry price, so the stop level
+sits proportionally higher and triggers sooner on the same premium
+path, ending some trades faster and freeing room for the next signal
+to fire within the same window; this mirrors how a real trader's
+stop is set relative to what they actually paid, not an idealized
+fill.)
 """
 from __future__ import annotations
 
