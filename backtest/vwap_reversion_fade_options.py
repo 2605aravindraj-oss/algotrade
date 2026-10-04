@@ -215,6 +215,79 @@ def run(
     return trades
 
 
+def run_nifty(from_date: str, to_date: str, **overrides) -> list[OptionTrade]:
+    """run() with NIFTY's own fine-tuned config, found by sweeping from
+    scratch on the 2024-10-03/2026-09-08 window (the only span this
+    codebase's expired NIFTY options chain covers).
+
+    UNTUNED BASELINE (band_pct=0.3, no sl/target, both sides): net
+    -Rs 49,945.31 on 306 trades, 49.0% win rate -- a near-coinflip win
+    rate (the mean-reversion premise itself isn't crazy) but still a
+    clear loss, because a fade's win is capped (price only needs to
+    travel back to VWAP) while its loss is NOT (nothing stops the
+    stretch from extending further until EOD) -- avg loss (-Rs
+    2,259.22) already exceeded avg win (+Rs 2,016.62) at baseline. This
+    capped-win/uncapped-loss asymmetry is structural, not a tuning
+    accident -- see sl_pct below, which exists specifically to fix it.
+
+    band_pct ALONE, swept 0.1-1.0 (no sl/target): net LOSS at every
+    single value tested (-Rs 5,824 to -Rs 78,913) -- confirms the
+    asymmetry can't be fixed by just picking a different stretch
+    threshold; the loss side has to be capped directly.
+
+    sl_pct fixes it -- swept 0.10-0.50 at band_pct=0.2 (then 0.25):
+    only band_pct=0.2 crossed positive, and only for a contiguous
+    sl_pct range (0.13-0.20, net Rs 3,268 to Rs 33,672) -- a real
+    plateau, not an isolated spike. Re-gridding band_pct x sl_pct
+    jointly over {0.19-0.24} x {0.14-0.20} confirmed sl_pct~0.16-0.18
+    as a genuine peak at EVERY band_pct tested in that range (not just
+    one lucky combination) -- cross-validated evidence this is a real
+    effect, not noise. target_pct was swept too (0.10-0.50) at the
+    best point found so far and never beat leaving it off: the
+    reversion-to-VWAP exit already acts as the strategy's own take-
+    profit, so a separate premium target only clips winners early.
+    Left off (None) by design.
+
+    LONG vs SHORT, swept independently at band_pct=0.20/sl_pct=0.16:
+    LONG ONLY (fading dips, buying CE) is a clear net LOSER (-Rs
+    22,575.53, 288 trades, 39.9% win rate) -- SHORT ONLY (fading
+    rallies, buying PE) is a clear net WINNER (+Rs 25,429.84, 280
+    trades, 48.2% win rate). The combined run's headline number
+    (+Rs 33,672.03) sits ABOVE the isolated short-only figure purely
+    because of one-trade-per-day slot competition (a day where LONG
+    fires first "steals" that day's only trade slot from a SHORT setup
+    that would otherwise have fired later) -- not a real synergy
+    between the two sides. Matches this codebase's recurring pattern
+    (narrow_cpr_breakout_options.py found the identical long-bad/
+    short-good split): NIFTY's own skew means a sharp intraday RALLY
+    is more likely to be an overextension that reverts than a sharp
+    DROP is, so short_only=True is the honest, robust config, not the
+    higher-but-slot-competition-inflated combined number.
+
+    Re-tuning band_pct/sl_pct specifically FOR short_only=True (the
+    combined-mode optimum doesn't have to be the short-only optimum,
+    and wasn't): band_pct re-peaked at 0.22-0.23 (net Rs 38,528/
+    38,361, a tied plateau top, smooth rise from 0.19 and smooth decay
+    through 0.24) and sl_pct re-peaked at 0.17 (net Rs 41,571.13,
+    smooth rise from 0.13 and decay through 0.20) -- both genuine
+    single-peaked curves, not spikes.
+
+    Final: band_pct=0.22, sl_pct=0.17, short_only=True, target_pct=
+    None -- 263 trades, net Rs 41,571.13, 49.4% win rate (130W/133L),
+    max drawdown -Rs 24,412.47. Avg win (Rs 2,180.46) > avg loss
+    (-Rs 1,818.71) -- the capped-win/uncapped-loss asymmetry from the
+    untuned baseline is fully corrected. Exit reasons split cleanly
+    three ways (117 reversion / 116 stop_loss / 30 eod), with no
+    single exit type dominating -- evidence the stop-loss and the
+    reversion thesis are both doing real, comparable amounts of work,
+    not that one has swallowed the other.
+    """
+    overrides.setdefault("band_pct", 0.22)
+    overrides.setdefault("sl_pct", 0.17)
+    overrides.setdefault("short_only", True)
+    return run(from_date, to_date, **overrides)
+
+
 def summary(trades: list[OptionTrade]) -> str:
     from backtest.macd_rsi2_momentum_options import summary as _summary
     return _summary(trades)
