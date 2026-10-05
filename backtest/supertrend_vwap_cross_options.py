@@ -288,6 +288,24 @@ path, ending some trades faster and freeing room for the next signal
 to fire within the same window; this mirrors how a real trader's
 stop is set relative to what they actually paid, not an idealized
 fill.)
+
+FUTURES vs SPOT ATM (atm_from_spot): tested whether selecting the ATM
+strike from the index's own spot close instead of the futures close
+(signal, VWAP, and SuperTrend all stay futures-based regardless)
+makes a difference. It does, and not a small one: 357 of 480 trades
+(74%) picked a DIFFERENT strike between the two methods, averaging 80
+points apart and ranging up to 200 points (4 strikes) on some days --
+far wider than a textbook cost-of-carry futures/spot basis would
+predict, suggesting this backtest environment's synthetic futures
+pricing is noisier than real arbitrage-bounded markets would allow.
+Net effect: spot-ATM nets Rs 143,011 (483 trades, 28.0% win rate,
+max drawdown -Rs 31,315) vs futures-ATM's Rs 161,332 (480 trades,
+29.0% win rate, max drawdown -Rs 29,416) on the same fresh pull of
+the full backtest window -- an ~11% worse result. Futures-ATM (the
+default, atm_from_spot=False) stays the right choice: it's internally
+consistent with the signal's own pricing source, and empirically
+outperforms here regardless of whether the gap is a real effect or an
+artifact of this environment's synthetic basis.
 """
 from __future__ import annotations
 
