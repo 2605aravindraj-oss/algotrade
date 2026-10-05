@@ -229,6 +229,13 @@ def run(stale_after_bars: int = 2) -> list[PatternHit]:
         except Exception as exc:
             print(f"  {symbol}: skipped ({exc})", file=sys.stderr)
             continue
+        # Drop trailing degenerate bars (h == l): this feed's last ~10-15
+        # minutes of the day often carry only a last-traded-price tick
+        # rather than a full 1-minute OHLC print, which resamples into a
+        # flat, zero-range 5-minute bucket that can never match a pattern
+        # and would otherwise mask a real signal on the bar just before it.
+        while len(bars) > 15 and bars[-1].h == bars[-1].l:
+            bars = bars[:-1]
         if len(bars) < 15:
             continue
         atr = _atr(bars)
