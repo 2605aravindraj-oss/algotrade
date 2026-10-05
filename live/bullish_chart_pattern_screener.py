@@ -56,7 +56,7 @@ tick).
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from data_sources import instruments
 from live.bullish_pattern_screener import NIFTY_50, Bar, _atr, _recent_bars, _trim_degenerate_tail
@@ -72,6 +72,9 @@ class ChartPatternHit:
     bar_time: str
     close: float
     level: float  # the neckline/resistance/flag-high being broken (or watched)
+    window_start: int = 0  # bar index to start the chart from (same `bars` list passed to the detector)
+    window_end: int = -1  # bar index to end the chart at (-1 == last bar)
+    markers: list = field(default_factory=list)  # [{"index": int, "label": str, "price": float}, ...]
 
 
 def _swing_points(bars: list[Bar]) -> tuple[list[tuple[int, float]], list[tuple[int, float]]]:
@@ -115,9 +118,15 @@ def _detect_double_bottom(bars: list[Bar], atr: float, highs, lows) -> ChartPatt
         if peak_price - max(p1, p2) < atr * 3.0:
             continue
         cur = bars[-1]
+        window_start = max(0, i1 - 5)
+        markers = [
+            {"index": i1, "label": "L1", "price": p1},
+            {"index": peak_idx, "label": "Peak", "price": peak_price},
+            {"index": i2, "label": "L2", "price": p2},
+        ]
         if cur.c > peak_price:
-            return ChartPatternHit("", "Double Bottom", "confirmed", cur.ts, cur.c, peak_price)
-        return ChartPatternHit("", "Double Bottom", "forming", bars[i2].ts, bars[i2].c, peak_price)
+            return ChartPatternHit("", "Double Bottom", "confirmed", cur.ts, cur.c, peak_price, window_start, -1, markers)
+        return ChartPatternHit("", "Double Bottom", "forming", bars[i2].ts, bars[i2].c, peak_price, window_start, -1, markers)
     return None
 
 
@@ -136,9 +145,14 @@ def _detect_ascending_triangle(bars: list[Bar], atr: float, highs, lows) -> Char
         return None
     resistance = sum(h[1] for h in recent_highs) / len(recent_highs)
     cur = bars[-1]
+    window_start = max(0, recent_highs[0][0] - 5)
+    markers = (
+        [{"index": i, "label": "R", "price": p} for i, p in recent_highs]
+        + [{"index": i, "label": "HL", "price": p} for i, p in inner_lows]
+    )
     if cur.c > resistance:
-        return ChartPatternHit("", "Ascending Triangle", "confirmed", cur.ts, cur.c, resistance)
-    return ChartPatternHit("", "Ascending Triangle", "forming", bars[inner_lows[-1][0]].ts, bars[inner_lows[-1][0]].c, resistance)
+        return ChartPatternHit("", "Ascending Triangle", "confirmed", cur.ts, cur.c, resistance, window_start, -1, markers)
+    return ChartPatternHit("", "Ascending Triangle", "forming", bars[inner_lows[-1][0]].ts, bars[inner_lows[-1][0]].c, resistance, window_start, -1, markers)
 
 
 def _detect_bullish_flag(bars: list[Bar], atr: float) -> ChartPatternHit | None:
@@ -175,9 +189,15 @@ def _detect_bullish_flag(bars: list[Bar], atr: float) -> ChartPatternHit | None:
             retrace = pole[-1].c - flag_low
             if retrace > pole_move * 0.4:
                 continue
+            markers = [
+                {"index": pole_start, "label": "Pole start", "price": pole[0].o},
+                {"index": pole_end - 1, "label": "Pole end", "price": pole[-1].c},
+                {"index": flag_start, "label": "Flag start", "price": flag[0].o},
+                {"index": flag_end - 1, "label": "Flag end", "price": flag[-1].c},
+            ]
             if cur.c > flag_high:
-                return ChartPatternHit("", "Bullish Flag", "confirmed", cur.ts, cur.c, flag_high)
-            return ChartPatternHit("", "Bullish Flag", "forming", flag[-1].ts, flag[-1].c, flag_high)
+                return ChartPatternHit("", "Bullish Flag", "confirmed", cur.ts, cur.c, flag_high, pole_start, -1, markers)
+            return ChartPatternHit("", "Bullish Flag", "forming", flag[-1].ts, flag[-1].c, flag_high, pole_start, -1, markers)
     return None
 
 

@@ -78,6 +78,7 @@ class PatternHit:
     bar_time: str
     close: float
     note: str = ""
+    span: int = 2  # how many trailing bars (ending at bar_time) the pattern spans -- for charting
 
 
 @dataclass
@@ -158,10 +159,11 @@ def _is_local_low(bars: list[Bar], i: int, lookback: int = 10) -> bool:
     return bars[i].l <= threshold
 
 
-def _detect(bars: list[Bar], atr: float) -> list[tuple[str, str]]:
-    """Returns [(pattern_name, note), ...] for patterns firing on the
-    LAST bar (bars[-1], the most recently closed candle)."""
-    hits: list[tuple[str, str]] = []
+def _detect(bars: list[Bar], atr: float) -> list[tuple[str, str, int]]:
+    """Returns [(pattern_name, note, span), ...] for patterns firing on
+    the LAST bar (bars[-1], the most recently closed candle). span is
+    how many trailing bars (ending at bars[-1]) the pattern spans."""
+    hits: list[tuple[str, str, int]] = []
     n = len(bars)
     if n < 3 or atr <= 0:
         return hits
@@ -169,28 +171,28 @@ def _detect(bars: list[Bar], atr: float) -> list[tuple[str, str]]:
 
     # Bullish Engulfing
     if prev.bearish and cur.bullish and cur.o <= prev.c and cur.c >= prev.o and cur.body > prev.body:
-        hits.append(("Bullish Engulfing", ""))
+        hits.append(("Bullish Engulfing", "", 2))
 
     # Hammer / Inverted Hammer (local-low context)
     if _is_local_low(bars, n - 1) and cur.body > 0:
         if cur.lower_wick >= 2 * cur.body and cur.upper_wick <= 0.3 * cur.body:
-            hits.append(("Hammer", ""))
+            hits.append(("Hammer", "", 1))
         elif cur.upper_wick >= 2 * cur.body and cur.lower_wick <= 0.3 * cur.body:
-            hits.append(("Inverted Hammer", "needs confirmation"))
+            hits.append(("Inverted Hammer", "needs confirmation", 1))
 
     # Bullish Harami
     if prev.bearish and cur.bullish and prev.body > atr * 0.5 and cur.o >= min(prev.o, prev.c) and cur.c <= max(prev.o, prev.c):
-        hits.append(("Bullish Harami", ""))
+        hits.append(("Bullish Harami", "", 2))
 
     # Piercing Line
     if prev.bearish and cur.bullish and prev.body > atr * 0.5:
         midpoint = (prev.o + prev.c) / 2
         if cur.o < prev.l and prev.c < cur.c < prev.o and cur.c > midpoint:
-            hits.append(("Piercing Line", ""))
+            hits.append(("Piercing Line", "", 2))
 
     # Tweezer Bottom
     if prev.bearish and cur.bullish and abs(prev.l - cur.l) <= atr * 0.1:
-        hits.append(("Tweezer Bottom", ""))
+        hits.append(("Tweezer Bottom", "", 2))
 
     # Morning Star (3-bar)
     if n >= 3:
@@ -198,7 +200,7 @@ def _detect(bars: list[Bar], atr: float) -> list[tuple[str, str]]:
         if (first.bearish and first.body > atr * 0.5 and star.body < atr * 0.3
                 and max(star.o, star.c) < first.c and cur.bullish
                 and cur.c > (first.o + first.c) / 2):
-            hits.append(("Morning Star", ""))
+            hits.append(("Morning Star", "", 3))
 
     # Three White Soldiers (3-bar)
     if n >= 3:
@@ -207,7 +209,7 @@ def _detect(bars: list[Bar], atr: float) -> list[tuple[str, str]]:
                 and b.o > a.o and b.o < a.c and c3.o > b.o and c3.o < b.c
                 and b.c > a.c and c3.c > b.c
                 and a.body > atr * 0.3 and b.body > atr * 0.3 and c3.body > atr * 0.3):
-            hits.append(("Three White Soldiers", ""))
+            hits.append(("Three White Soldiers", "", 3))
 
     return hits
 
@@ -250,8 +252,8 @@ def run(stale_after_bars: int = 2) -> list[PatternHit]:
             end = len(bars) - offset
             if end < 3:
                 break
-            for pattern, note in _detect(bars[:end], atr):
-                hits.append(PatternHit(symbol=symbol, pattern=pattern, bar_time=bars[end - 1].ts, close=bars[end - 1].c, note=note))
+            for pattern, note, span in _detect(bars[:end], atr):
+                hits.append(PatternHit(symbol=symbol, pattern=pattern, bar_time=bars[end - 1].ts, close=bars[end - 1].c, note=note, span=span))
             if offset == 0:
                 time.sleep(0)  # placeholder for clarity; no extra sleep needed here
     return hits
