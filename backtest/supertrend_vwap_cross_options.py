@@ -330,6 +330,7 @@ def run(
     require_hold_bar: bool = False,
     narrow_cpr_max_width_pct: float | None = 0.26,
     slippage_pct: float = 0.0,
+    atm_from_spot: bool = False,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     """slippage_pct: adverse execution applied directly to each fill's
@@ -338,6 +339,16 @@ def run(
     slippage_pct MORE than the observed candle close and the exit fill
     receives slippage_pct LESS. 0.0 (default) reproduces the exact
     fills used everywhere else in this codebase.
+
+    atm_from_spot: when True, the ATM strike is selected using the
+    INDEX's own spot close at each decision bar instead of the futures
+    close used for everything else (SuperTrend, VWAP, the signal
+    itself all stay futures-based regardless -- the index carries
+    volume=0 on every candle here, so it can't support a real VWAP).
+    Isolates whether the futures/spot basis (futures normally trade at
+    a cost-of-carry premium to spot) meaningfully shifts which strike
+    gets bought. False (default) reproduces the exact existing
+    behavior (ATM from the futures price, same as the signal).
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
@@ -414,6 +425,20 @@ def run(
     if len(bars) < st_period + 2:
         return []
 
+    spot_close_by_ts: dict[str, float] = {}
+    if atm_from_spot:
+        all_1min_spot: list[list] = []
+        for day in trading_days:
+            d = day["date"]
+            rows = sorted(
+                cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False),
+                key=lambda c: c[0],
+            )
+            all_1min_spot.extend(rows)
+        all_1min_spot.sort(key=lambda c: c[0])
+        spot_bars = _resample(all_1min_spot, candle_minutes)
+        spot_close_by_ts = {row[0]: row[4] for row in spot_bars}
+
     st_dir, _st_line = _compute_supertrend_line(bars, st_period, st_multiplier)
     ema_filter = _ema([b[4] for b in bars], ema_filter_period) if ema_filter_period else None
 
@@ -461,7 +486,8 @@ def run(
         cum_vol += v
         vwap = (cum_pv / cum_vol) if cum_vol > 0 else None
 
-        atm = oc.round_to_step(c, strike_step)
+        atm_price = spot_close_by_ts.get(ts, c) if atm_from_spot else c
+        atm = oc.round_to_step(atm_price, strike_step)
         expiry = next((e for e in expiries if e >= d), None)
 
         _dh, _dm = divmod(int(time_str[:2]) * 60 + int(time_str[3:5]) + candle_minutes, 60)
