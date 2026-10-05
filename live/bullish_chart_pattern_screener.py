@@ -17,12 +17,17 @@ confirmed until `right` bars after it exist, same as any real-time
 fractal detector -- the very last few bars can never be pivots yet.
 
 DOUBLE BOTTOM: two swing lows L1, L2 (8-60 bars apart, roughly a
-40-minute to 5-hour span) within 1.0x ATR of each other (comparable
-depth), with an intervening swing high ("the peak"/neckline) at least
-2.0x ATR above both -- without a real intervening bounce, two nearby
-lows are just noise, not a "W". CONFIRMED when the latest close is
-above the peak (the breakout); otherwise reported separately as
-FORMING (both lows in place, breakout not yet triggered).
+40-minute to 5-hour span) within 0.5x ATR of each other (comparable
+depth), each confirmed as the TRUE extreme of the [L1, L2] span (not
+just a local 3-bar fractal minimum -- rules out a deeper, untagged dip
+hiding in between), with an intervening swing high ("the peak"/
+neckline) at least 3.0x ATR above both -- without a real intervening
+bounce, two nearby lows are just noise, not a "W". STALE if L2 formed
+more than 40 bars (~3.3 hours) ago with no breakout since -- no longer
+an actionable "now" signal, dropped entirely rather than reported.
+CONFIRMED when the latest close is above the peak (the breakout);
+otherwise reported separately as FORMING (both lows in place, breakout
+not yet triggered).
 
 ASCENDING TRIANGLE: the most recent 2-3 swing highs sit within 0.5x
 ATR of each other (a flat resistance) while the swing lows in between
@@ -31,11 +36,15 @@ genuine higher lows, not noise). CONFIRMED when the latest close
 breaks above that flat resistance; otherwise FORMING.
 
 BULLISH FLAG: a "pole" -- an impulsive move where cumulative return
-over a 6-16 bar window is >= 3.0x ATR with at least 65% of those bars
+over a 6-16 bar window is >= 4.0x ATR with at least 70% of those bars
 bullish -- followed immediately by a "flag": 3-10 bars consolidating
-in a tight range (high-low spread <= 60% of the pole's own size) that
-retraces no more than 50% of the pole. CONFIRMED when the latest close
-breaks above the flag's own high; otherwise FORMING.
+in a tight range (high-low spread <= 50% of the pole's own size) that
+retraces no more than 40% of the pole. The flag's own high/low is
+computed ONLY from the formation bars strictly before "now" -- the
+current bar is checked against that level, never included in it (an
+earlier bug let the current bar leak into its own breakout level,
+making the check nearly always false). CONFIRMED when the latest
+close breaks above the flag's own high; otherwise FORMING.
 
 DATA: same pipeline as bullish_pattern_screener.py -- public
 historical-candle endpoint for the last few trading days plus
@@ -83,16 +92,27 @@ def _detect_double_bottom(bars: list[Bar], atr: float, highs, lows) -> ChartPatt
     for j in range(len(lows) - 1, 0, -1):
         i2, p2 = lows[j]
         i1, p1 = lows[j - 1]
+        # staleness: a double bottom whose second low formed long ago
+        # with no breakout since is no longer an actionable "now" signal
+        # for a live screener, even if it's technically still valid.
+        # i2 only gets OLDER as j decreases, so once stale, stop looking.
+        if len(bars) - 1 - i2 > 40:
+            break
         gap = i2 - i1
         if gap < 8 or gap > 60:
             continue
-        if abs(p1 - p2) > atr * 1.0:
+        if abs(p1 - p2) > atr * 0.5:
+            continue
+        # L1/L2 must be the TRUE extremes of their span, not just local
+        # 3-bar fractal minima -- otherwise a deeper, untagged dip
+        # elsewhere in [i1, i2] would make this a fake "W".
+        if min(b.l for b in bars[i1:i2 + 1]) < min(p1, p2) - atr * 0.1:
             continue
         between_peaks = [h for h in highs if i1 < h[0] < i2]
         if not between_peaks:
             continue
         peak_idx, peak_price = max(between_peaks, key=lambda h: h[1])
-        if peak_price - max(p1, p2) < atr * 2.0:
+        if peak_price - max(p1, p2) < atr * 3.0:
             continue
         cur = bars[-1]
         if cur.c > peak_price:
@@ -123,30 +143,38 @@ def _detect_ascending_triangle(bars: list[Bar], atr: float, highs, lows) -> Char
 
 def _detect_bullish_flag(bars: list[Bar], atr: float) -> ChartPatternHit | None:
     n = len(bars)
+    cur = bars[-1]
     for pole_len in range(16, 5, -1):
+        # flag_len counts only the FORMATION bars (excluding the current/
+        # last bar, which is the one being checked for a breakout) -- the
+        # breakout level must come from bars strictly before "now", or
+        # checking cur.c against a high that already includes cur.h is
+        # circular (cur.c > cur.h is nearly always false, so it silently
+        # degenerates to "forming" with level == cur's own high/close).
         for flag_len in range(3, 11):
-            pole_end = n - flag_len
+            flag_end = n - 1  # last formation bar, i.e. bar before cur
+            flag_start = flag_end - flag_len
+            pole_end = flag_start
             pole_start = pole_end - pole_len
-            if pole_start < 0 or pole_end <= 0 or pole_end >= n:
+            if pole_start < 0 or flag_start < 0 or flag_end <= flag_start:
                 continue
             pole = bars[pole_start:pole_end]
-            flag = bars[pole_end:n]
+            flag = bars[flag_start:flag_end]
             if len(pole) < 2 or len(flag) < 3:
                 continue
             pole_move = pole[-1].c - pole[0].o
-            if pole_move < atr * 3.0:
+            if pole_move < atr * 4.0:
                 continue
             bullish_frac = sum(1 for b in pole if b.bullish) / len(pole)
-            if bullish_frac < 0.65:
+            if bullish_frac < 0.70:
                 continue
             flag_high = max(b.h for b in flag)
             flag_low = min(b.l for b in flag)
-            if flag_high - flag_low > pole_move * 0.6:
+            if flag_high - flag_low > pole_move * 0.5:
                 continue
             retrace = pole[-1].c - flag_low
-            if retrace > pole_move * 0.5:
+            if retrace > pole_move * 0.4:
                 continue
-            cur = bars[-1]
             if cur.c > flag_high:
                 return ChartPatternHit("", "Bullish Flag", "confirmed", cur.ts, cur.c, flag_high)
             return ChartPatternHit("", "Bullish Flag", "forming", flag[-1].ts, flag[-1].c, flag_high)
