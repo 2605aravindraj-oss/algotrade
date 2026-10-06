@@ -271,6 +271,22 @@ def run_nifty(from_date: str, to_date: str, **overrides) -> list[OptionTrade]:
     a real asymmetry in an otherwise-working signal, not when the
     signal itself is the problem.
 
+    sl_rs / target_rs (TOTAL RUPEE P&L, not premium points/pct) swept
+    even more exhaustively, still at min_histogram_buffer=0: fixing
+    sl_rs=400 and sweeping target_rs across 20-1500 (18 values) is
+    still uniformly negative, ranging from -Rs 210,742 (the single
+    best point, target_rs=50) to -Rs 302,153 (target_rs=1500). The
+    shape is informative even though it never gets close to positive:
+    win rate climbs smoothly as target_rs shrinks (24.9% at 1500 up to
+    a peak of ~55% around target_rs=50-60) since a smaller target is
+    easier to hit, but each win pays less, so gross P&L barely moves
+    while the ~Rs 146,500 fixed cost burden from ~2,456 trades (that
+    count barely changes across this whole sweep -- it's set by the
+    ENTRY, not the exit) stays constant and dominates regardless.
+    Confirms yet again, now from the rupee-P&L angle specifically
+    requested, that no exit style -- percentage, premium-points, or
+    total rupees -- can rescue this entry's literal trade frequency.
+
     min_histogram_buffer (filtering the ENTRY instead of the exit --
     requiring the histogram to clear N index points past zero before
     counting as a real cross, not merely touch it) DOES fix it: trade
