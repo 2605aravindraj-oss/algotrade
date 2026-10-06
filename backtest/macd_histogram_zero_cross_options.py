@@ -61,6 +61,8 @@ def run(
     target_pct: float | None = None,
     sl_points: float | None = None,
     target_points: float | None = None,
+    sl_rs: float | None = None,
+    target_rs: float | None = None,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -73,12 +75,22 @@ def run(
     request.
 
     sl_points / target_points: fixed PREMIUM-POINT stop-loss/target
-    (not a percentage) -- stop_level = entry_premium - sl_points,
-    target_level = entry_premium + target_points, same convention as
-    synthetic_straddle_breakout_options.py and
-    ema_sweep_breakout_options.py. Checked alongside sl_pct/target_pct
-    if both are set (either one triggering closes the trade); normally
-    use one style or the other, not both.
+    (not a percentage, not total rupees) -- stop_level = entry_premium
+    - sl_points, target_level = entry_premium + target_points, same
+    convention as synthetic_straddle_breakout_options.py and
+    ema_sweep_breakout_options.py.
+
+    sl_rs / target_rs: fixed TOTAL RUPEE P&L stop-loss/target for the
+    whole position (premium points x lot_size) -- e.g. target_rs=150,
+    sl_rs=400 closes the trade the moment unrealized P&L reaches
+    +Rs 150 or -Rs 400, regardless of the lot size that trade happens
+    to use (lot size can differ by expiry). Every position here is a
+    bought option (CE or PE, never sold short), so P&L is always
+    (current_premium - entry_premium) * lot_size for both directions.
+
+    All four stop/target styles are checked together if more than one
+    is set (any one triggering closes the trade) -- normally use just
+    one style.
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
@@ -174,17 +186,27 @@ def run(
             is_long = position["direction"] == "LONG"
             hit_reversal = (is_long and hist < 0) or (not is_long and hist > 0)
             hit_sl = hit_target = False
-            if sl_pct is not None or target_pct is not None or sl_points is not None or target_points is not None:
+            needs_check = (
+                sl_pct is not None or target_pct is not None
+                or sl_points is not None or target_points is not None
+                or sl_rs is not None or target_rs is not None
+            )
+            if needs_check:
                 _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
                 bar = _fill(candles, decision_time_str) if candles else None
                 cur_premium = bar[4] if bar else position["entry_price"]
+                pnl_rs = (cur_premium - position["entry_price"]) * position["lot_size"]
                 if sl_pct is not None and cur_premium <= position["entry_price"] * (1 - sl_pct):
                     hit_sl = True
                 if sl_points is not None and cur_premium <= position["entry_price"] - sl_points:
                     hit_sl = True
+                if sl_rs is not None and pnl_rs <= -sl_rs:
+                    hit_sl = True
                 if target_pct is not None and cur_premium >= position["entry_price"] * (1 + target_pct):
                     hit_target = True
                 if target_points is not None and cur_premium >= position["entry_price"] + target_points:
+                    hit_target = True
+                if target_rs is not None and pnl_rs >= target_rs:
                     hit_target = True
             if hit_sl:
                 _close("stop_loss")
