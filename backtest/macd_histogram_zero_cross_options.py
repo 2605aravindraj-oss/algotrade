@@ -205,9 +205,10 @@ def run(
 
 
 def run_nifty(from_date: str, to_date: str, **overrides) -> list[OptionTrade]:
-    """run() with NIFTY's own fine-tuned config, found by sweeping from
-    scratch on the 2024-10-03/2026-09-08 window (the only span this
-    codebase's expired NIFTY options chain covers).
+    """run() with no extra defaults applied -- a thin pass-through, kept
+    only to record the tuning history below. Swept from scratch on the
+    2024-10-03/2026-09-08 window (the only span this codebase's
+    expired NIFTY options chain covers).
 
     LITERAL ZERO-CROSS (min_histogram_buffer=0, the request's exact
     spec): a disaster -- 2,455 trades, net -Rs 243,954.27, 28.3% win
@@ -216,38 +217,34 @@ def run_nifty(from_date: str, to_date: str, **overrides) -> list[OptionTrade]:
     whipsawed constantly by a choppy market, generating ~5 trades/day
     with no real edge, not just a cost problem.
 
-    min_histogram_buffer requires the histogram to clear N index
-    points PAST zero (not merely touch it) before counting as a real
-    signal, skipping the noisy dead zone right around the line.
-    Measured this index's own 5-min histogram distribution first
-    (median |histogram| ~3.35, 75th pct ~6.51, 90th pct ~11.29) rather
-    than guessing a sweep range. Coarse sweep 0-20: trade count
-    collapses from 2,455 at buffer=0 to 237 at buffer=1 (a >10x drop
-    from just one point of buffer) -- confirms the whipsaw diagnosis.
-    A fine grid 0.25-3.0 showed a genuine, broadly improving region
-    (not an isolated spike): win rate climbs steadily from 31.0% at
-    0.25 up through 41.2% at 1.5/1.75 (one noisy dip at 1.25 inside an
-    otherwise consistent trend), with the best net P&L (Rs 15,733-
-    17,274) landing at buffer=1.5-1.75 on a still-reasonable sample
-    (64-97 trades, not a handful of lucky ones). Beyond buffer=2.25
-    trade count collapses below 30 and the result degrades -- too few
-    trades to trust, not necessarily a real effect reversing.
+    EXIT TUNING ALONE (sl_pct / target_pct, min_histogram_buffer held
+    at 0 -- holding the whipsaw-prone entry fixed and trying to fix it
+    purely through risk management on each trade): NO viable
+    configuration found. sl_pct swept alone (11 values, 0.05-0.50):
+    every one stays deeply negative, -Rs 189,265 (the single best,
+    sl_pct=0.10) to -Rs 262,306. target_pct swept alone (11 values,
+    0.05-0.50): every one also negative, -Rs 207,614 to -Rs 248,478.
+    A 14-point joint sl_pct x target_pct grid around both best-looking
+    single-axis values confirmed it: -Rs 209,097 to -Rs 274,953, no
+    combination anywhere near positive. Conclusion: exit tuning cannot
+    rescue this signal at its literal, whipsaw-prone trade frequency --
+    the entry itself has no edge at ~5 trades/day, so no amount of
+    stop-loss or target placement on individual trades fixes it. This
+    matches the pattern seen elsewhere in this codebase (e.g.
+    orb_breakout_options.py): a stop-loss only helps when it corrects
+    a real asymmetry in an otherwise-working signal, not when the
+    signal itself is the problem.
 
-    sl_pct swept 0.15-0.50 at buffer=1.5: no consistent improvement
-    over leaving it off (results bounce Rs 9,614-18,157 with no clear
-    trend) -- the reversal exit (opposite histogram cross) already
-    bounds losses reasonably on its own. Left off (None) by design.
-
-    LONG vs SHORT at buffer=1.5: BOTH sides profitable with nearly
-    identical win rates (44 LONG trades, 43.2% win rate, Rs 18,686
-    gross vs 53 SHORT trades, 43.4% win rate, Rs 3,240 gross) -- no
-    masking asymmetry here (unlike narrow_cpr_breakout_options.py or
-    vwap_reversion_fade_options.py), so both sides stay on.
-
-    Final: min_histogram_buffer=1.5, sl_pct=None -- 97 trades, net
-    Rs 15,732.96, 41.2% win rate (40W/57L), max drawdown -Rs 29,298.72.
+    min_histogram_buffer (filtering the ENTRY instead of the exit --
+    requiring the histogram to clear N index points past zero before
+    counting as a real cross, not merely touch it) DOES fix it: trade
+    count collapses from 2,455 at buffer=0 to 237 at buffer=1, and a
+    fine grid found a genuine improving region peaking at buffer=1.5-
+    1.75 (net Rs 15,733-17,274, ~41% win rate, 64-97 trades -- see git
+    history for the full sweep). Not applied as a default here per
+    request (this function tunes the entry's own exits, not the
+    entry); pass min_histogram_buffer explicitly to use it.
     """
-    overrides.setdefault("min_histogram_buffer", 1.5)
     return run(from_date, to_date, **overrides)
 
 
