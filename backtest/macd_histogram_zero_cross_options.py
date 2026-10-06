@@ -56,11 +56,20 @@ def run(
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
+    min_histogram_buffer: float = 0.0,
     sl_pct: float | None = None,
     target_pct: float | None = None,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    """min_histogram_buffer: requires the histogram to clear this many
+    index points PAST zero (not merely cross it) before counting as a
+    real signal -- e.g. 2.0 means a LONG needs prev_hist <= -2.0 and
+    hist > 2.0, skipping the dead zone right around the zero line
+    where a choppy market whipsaws back and forth on tiny moves.
+    0.0 (default) reproduces the literal zero-cross described in the
+    request.
+    """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if len(trading_days) < 1:
@@ -172,9 +181,9 @@ def run(
 
         if position is None and prev_hist is not None and expiry is not None:
             direction_label = None
-            if prev_hist <= 0 and hist > 0:
+            if prev_hist <= -min_histogram_buffer and hist > min_histogram_buffer:
                 direction_label = "LONG"
-            elif prev_hist >= 0 and hist < 0:
+            elif prev_hist >= min_histogram_buffer and hist < -min_histogram_buffer:
                 direction_label = "SHORT"
 
             if direction_label is not None:
