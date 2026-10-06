@@ -59,6 +59,8 @@ def run(
     min_histogram_buffer: float = 0.0,
     sl_pct: float | None = None,
     target_pct: float | None = None,
+    sl_points: float | None = None,
+    target_points: float | None = None,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -69,6 +71,14 @@ def run(
     where a choppy market whipsaws back and forth on tiny moves.
     0.0 (default) reproduces the literal zero-cross described in the
     request.
+
+    sl_points / target_points: fixed PREMIUM-POINT stop-loss/target
+    (not a percentage) -- stop_level = entry_premium - sl_points,
+    target_level = entry_premium + target_points, same convention as
+    synthetic_straddle_breakout_options.py and
+    ema_sweep_breakout_options.py. Checked alongside sl_pct/target_pct
+    if both are set (either one triggering closes the trade); normally
+    use one style or the other, not both.
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
@@ -164,14 +174,18 @@ def run(
             is_long = position["direction"] == "LONG"
             hit_reversal = (is_long and hist < 0) or (not is_long and hist > 0)
             hit_sl = hit_target = False
-            if sl_pct is not None or target_pct is not None:
+            if sl_pct is not None or target_pct is not None or sl_points is not None or target_points is not None:
                 _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
                 bar = _fill(candles, decision_time_str) if candles else None
                 cur_premium = bar[4] if bar else position["entry_price"]
-                if sl_pct is not None:
-                    hit_sl = cur_premium <= position["entry_price"] * (1 - sl_pct)
-                if target_pct is not None:
-                    hit_target = cur_premium >= position["entry_price"] * (1 + target_pct)
+                if sl_pct is not None and cur_premium <= position["entry_price"] * (1 - sl_pct):
+                    hit_sl = True
+                if sl_points is not None and cur_premium <= position["entry_price"] - sl_points:
+                    hit_sl = True
+                if target_pct is not None and cur_premium >= position["entry_price"] * (1 + target_pct):
+                    hit_target = True
+                if target_points is not None and cur_premium >= position["entry_price"] + target_points:
+                    hit_target = True
             if hit_sl:
                 _close("stop_loss")
             elif hit_target:
