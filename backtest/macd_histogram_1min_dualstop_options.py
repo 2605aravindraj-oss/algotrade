@@ -1,14 +1,17 @@
 """Backtest of live/macd_histogram_1min_live.py's EXACT entry/exit logic
-(histogram zero-cross on NIFTY 50 spot 1-minute candles, dual-condition
+(histogram zero-cross on NIFTY 50 spot candles, dual-condition
 stop-loss, target_rs + trailing) over a date RANGE, through real ATM
 NIFTY options -- so the live script's parameters (chiefly target_rs) can
 be tuned against more than one day before being adopted as the live
-default.
+default. candle_minutes (default 1) resamples each day's 1-minute index
+candles to that bar size first -- e.g. candle_minutes=5 replays the
+exact same signal/stop/target logic a 5-minute version of the live
+script would use, for comparison against the 1-minute default.
 
 SIGNAL/STOP/TARGET: identical to live/macd_histogram_1min_live.py --
     - MACD(12,26,9) reseeded FRESH every trading day (an SMA seed on
-      that day's own 1-minute closes, matching the live script after
-      its "revert back to daily calculation" change -- NOT a
+      that day's own candles, matching the live script after its
+      "revert back to daily calculation" change -- NOT a
       continuously-running EMA across days, unlike
       macd_histogram_zero_cross_options.py's 5-minute version).
     - Fresh cross <=0->>0 buys ATM CE; >=0-><0 buys ATM PE.
@@ -16,7 +19,12 @@ SIGNAL/STOP/TARGET: identical to live/macd_histogram_1min_live.py --
       script's own docstring for the exact rule).
     - target_rs (default 150.0): once peak P&L/lot first reaches it,
       the stop reference starts trailing to each new peak.
-Only difference from the live script: this also force-flattens any
+Each bar's own timestamp doubles as both the signal decision point and
+the fill reference (its own close), exactly as the live script treats
+"filled at the crossing candle's own close" -- same convention at any
+candle_minutes, not just 1.
+
+Other differences from the live script: this also force-flattens any
 still-open position at FORCE_FLAT_TIME (15:25) at day end (the live
 script just reports "still open" since it only ever looks at today),
 and realizes P&L through OptionTrade's real cost model (brokerage/
@@ -35,6 +43,7 @@ from data_sources import cache, upstox_client
 from backtest import options_common as oc
 from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
 from backtest.macd_rsi2_momentum_options import OptionTrade
+from backtest.sweep_reclaim_breakout import _resample
 from backtest.technical_rating import _macd
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
@@ -51,6 +60,7 @@ def run(
     to_date: str,
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
+    candle_minutes: int = 1,
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
@@ -87,7 +97,10 @@ def run(
 
     for day in trading_days:
         d = day["date"]
-        rows = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        if len(rows_1min) < 2:
+            continue
+        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
         if len(rows) < 2:
             continue
         closes = [r[4] for r in rows]
