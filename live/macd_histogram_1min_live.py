@@ -1,53 +1,68 @@
 """Live, TODAY-ONLY check: MACD(12,26,9) histogram zero-cross on NIFTY 50
-spot 1-minute candles, buy ATM CE at the crossing candle's own close.
+spot 1-minute candles -- buy ATM CE on a bullish cross, buy ATM PE on a
+bearish cross, each filled at the crossing candle's own close.
 
-Not a backtest -- this looks at TODAY's candles only (both for the
-index and for each resolved ATM CE contract) and reports EVERY signal
-that's fired today so far, in order: closed (stopped-out) trades and,
-if the most recent one hasn't stopped yet, the currently open trade.
-After a stop-loss, scanning resumes from the very next bar looking for
-a fresh cross -- a choppy morning can produce several signals in a
-row (seen live: 2026-10-07 fired at 10:00 IST, stopped out at 10:01,
-then fired again at 10:05 and stayed open -- an earlier version of
-this script only reported the first signal of the day and silently
-dropped every later one, which is the bug this fixed).
+Not a backtest -- this looks at TODAY's candles only (for the index and
+for each resolved ATM CE/PE contract) and reports EVERY signal that's
+fired today so far, in order: closed (stopped-out) trades and, if the
+most recent one hasn't stopped yet, the currently open trade. After a
+stop-loss, scanning resumes from the very next bar looking for a fresh
+cross in EITHER direction -- a choppy morning can produce several
+signals in a row, CE and PE alike (seen live: 2026-10-07 fired at 10:00
+IST, stopped out at 10:01, then fired again at 10:05 and stayed open --
+an earlier version of this script only reported the first signal of
+the day and silently dropped every later one, which is the bug this
+fixed; a later version only ever looked for bullish crosses/CE, which
+is the gap this fixes).
 
 SIGNAL: MACD(12,26,9) on the index's own 1-minute closes (continuous
 through today's bars so far -- needs the standard 12/26/9 EMA warm-up,
-~34 bars/34 minutes before the first real histogram value). Each bar
-whose histogram crosses from <=0 to >0 (a fresh cross, not merely "is
-positive") opens a trade: buy the ATM CE, filled at that candle's own
-close. Only one position open at a time -- the scan for the NEXT
-entry only resumes after the current one's stop triggers.
+~34 bars/34 minutes before the first real histogram value).
+  - A fresh cross from <=0 to >0 (not merely "is positive") opens a
+    LONG/CE trade: buy the ATM CE, filled at that candle's own close.
+  - A fresh cross from >=0 to <0 opens a SHORT/PE trade: buy the ATM
+    PE, filled at that candle's own close.
+Only one position open at a time -- the scan for the NEXT entry (CE or
+PE, whichever crosses first) only resumes after the current one's stop
+triggers.
 
 STOP-LOSS (as specified -- a dual condition, not price alone and not
-histogram alone): the first LATER candle whose close is BELOW the
-REFERENCE candle's own close AND whose histogram is BELOW the
-reference candle's own histogram value. Both must hold on the same
-candle. Requiring both avoids a single noisy wick (price dips but
-momentum hasn't actually weakened, or vice versa) stopping the trade
-out. The reference starts as the entry candle itself.
+histogram alone -- mirrored for the two trade directions since a CE
+is a bullish bet and a PE a bearish one):
+  - CE: the first LATER candle whose close is BELOW the REFERENCE
+    candle's own close AND whose histogram is BELOW the reference
+    candle's own histogram value.
+  - PE: the mirror -- the first LATER candle whose close is ABOVE the
+    reference candle's own close AND whose histogram is ABOVE the
+    reference candle's own histogram value.
+Both conditions must hold on the same candle. Requiring both avoids a
+single noisy wick (price moves but momentum hasn't actually weakened,
+or vice versa) stopping the trade out. The reference starts as the
+entry candle itself.
 
-TARGET + TRAILING (target_rs, default 150.0): once unrealized P&L
-for one lot (option premium move x lot_size) first reaches +Rs150,
-the stop-loss REFERENCE switches from the fixed entry candle to the
-candle that just set that new peak, and keeps ratcheting forward to
-whichever later candle sets a new peak P&L after that -- the dual
-stop condition above is then checked against this trailing
-reference instead of the entry. This locks in progressively more
-gain without capping the upside at a flat Rs150 exit: the trade can
-keep running as long as price and histogram don't BOTH fall back
-below the latest peak candle. Before the first time Rs150 is
+TARGET + TRAILING (target_rs, default 150.0): once unrealized P&L for
+one lot (option premium move x lot_size -- the same formula for CE and
+PE, since both are long option positions whose premium rises as the
+trade works in its favour) first reaches +Rs150, the stop-loss
+REFERENCE switches from the fixed entry candle to the candle that just
+set that new peak, and keeps ratcheting forward to whichever later
+candle sets a new peak P&L after that -- the dual stop condition above
+(mirrored per direction) is then checked against this trailing
+reference instead of the entry. This locks in progressively more gain
+without capping the upside at a flat Rs150 exit: the trade can keep
+running as long as price and histogram don't BOTH fall back below (CE)
+or above (PE) the latest peak candle. Before the first time Rs150 is
 reached, the stop is anchored to the entry candle exactly as before.
 
 STRIKE/EXPIRY: ATM = round-to-50 of the index close at the entry
 candle; nearest weekly expiry today, resolved from Upstox's live
-instrument master (NSE_FO segment, underlying NIFTY) -- the same
-master-loading pattern live_nifty_insights.py uses, since this is a
-LIVE (non-expired) contract, not one of this codebase's cached
+instrument master (NSE_FO segment, underlying NIFTY, instrument_type
+CE or PE to match the cross direction) -- the same master-loading
+pattern live_nifty_insights.py uses, since this is a LIVE
+(non-expired) contract, not one of this codebase's cached
 expired-instruments.
 
-DATA: both the index and the CE contract's candles come from
+DATA: both the index and the CE/PE contract's candles come from
 upstox_client.get_intraday_candles -- public, no auth, current
 trading day only.
 """
@@ -77,11 +92,11 @@ def _load_master() -> list[dict]:
         return json.load(f)
 
 
-def _nearest_nifty_ce(master: list[dict], strike: float) -> dict | None:
+def _nearest_nifty_option(master: list[dict], strike: float, instrument_type: str) -> dict | None:
     opts = [
         d for d in master
         if d.get("segment") == "NSE_FO" and d.get("underlying_symbol") == "NIFTY"
-        and d.get("instrument_type") == "CE"
+        and d.get("instrument_type") == instrument_type
     ]
     if not opts:
         return None
@@ -113,7 +128,15 @@ def run(target_rs: float = 150.0) -> dict:
             prev_hist = hist
             i += 1
             continue
-        if prev_hist is None or not (prev_hist <= 0 and hist > 0):
+        if prev_hist is None:
+            prev_hist = hist
+            i += 1
+            continue
+        if prev_hist <= 0 and hist > 0:
+            direction = "CE"
+        elif prev_hist >= 0 and hist < 0:
+            direction = "PE"
+        else:
             prev_hist = hist
             i += 1
             continue
@@ -128,9 +151,10 @@ def run(target_rs: float = 150.0) -> dict:
         if master is None:
             master = _load_master()
         atm = _round_to_50(entry_close)
-        contract = _nearest_nifty_ce(master, atm)
+        contract = _nearest_nifty_option(master, atm, direction)
         if contract is None:
-            trades.append({"status": "error", "message": "could not resolve a live NIFTY CE contract",
+            trades.append({"status": "error", "direction": direction,
+                            "message": f"could not resolve a live NIFTY {direction} contract",
                             "entry_time": entry_ts})
             i = entry_idx + 1
             prev_hist = hist
@@ -138,7 +162,8 @@ def run(target_rs: float = 150.0) -> dict:
 
         opt_rows = sorted(upstox_client.get_intraday_candles(contract["instrument_key"], "1minute"), key=lambda r: r[0])
         if not opt_rows:
-            trades.append({"status": "error", "message": "no intraday candles yet for the resolved CE contract",
+            trades.append({"status": "error", "direction": direction,
+                            "message": f"no intraday candles yet for the resolved {direction} contract",
                             "entry_time": entry_ts, "trading_symbol": contract["trading_symbol"]})
             i = entry_idx + 1
             prev_hist = hist
@@ -174,13 +199,15 @@ def run(target_rs: float = 150.0) -> dict:
                 if peak_pnl_per_lot >= target_rs:
                     trailing_active = True
                     ref_close, ref_hist = c, h
-            if c < ref_close and h < ref_hist:
+            stop_hit = (c < ref_close and h < ref_hist) if direction == "CE" else (c > ref_close and h > ref_hist)
+            if stop_hit:
                 exit_idx = j
                 exit_reason = "trailing_stop" if trailing_active else "stop_loss"
                 break
 
         trade = {
             "status": "open" if exit_idx is None else "stopped_out",
+            "direction": direction,
             "entry_time": entry_ts,
             "entry_index_close": entry_close,
             "entry_histogram": entry_hist,
@@ -239,19 +266,21 @@ def run(target_rs: float = 150.0) -> dict:
 
 def _trade_summary(trade: dict) -> str:
     if trade.get("status") == "error":
-        return f"  [{trade['entry_time']}] Error: {trade['message']}"
+        return f"  [{trade['entry_time']}] Error ({trade.get('direction', '?')}): {trade['message']}"
+    direction = trade["direction"]
     lines = [
-        f"  Entry {trade['entry_time']} IST: spot close={trade['entry_index_close']:.2f}, "
+        f"  Entry {trade['entry_time']} IST ({direction}): spot close={trade['entry_index_close']:.2f}, "
         f"histogram={trade['entry_histogram']:.2f}",
         f"    Bought {trade['trading_symbol']} (strike {trade['strike']:.0f}) @ {trade['entry_premium']:.2f} "
         f"(fill {trade['entry_premium_time']}, lot size {trade['lot_size']})",
     ]
     if trade["status"] == "stopped_out":
         ref_kind = "TRAILED reference (peak after target hit)" if trade["trailing_was_active"] else "entry reference"
+        cmp_word = "<" if direction == "CE" else ">"
         lines.append(
             f"    STOPPED ({trade['exit_reason']}) at {trade['exit_time']} IST: spot close="
-            f"{trade['exit_index_close']:.2f} < {ref_kind} AND histogram={trade['exit_histogram']:.2f} < it, "
-            f"both on the same bar"
+            f"{trade['exit_index_close']:.2f} {cmp_word} {ref_kind} AND histogram={trade['exit_histogram']:.2f} "
+            f"{cmp_word} it, both on the same bar"
         )
         lines.append(
             f"    Exit premium {trade['exit_premium']:.2f} (fill {trade['exit_premium_time']}) -- "
