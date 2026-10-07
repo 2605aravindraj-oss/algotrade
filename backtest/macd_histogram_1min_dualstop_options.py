@@ -9,11 +9,19 @@ exact same signal/stop/target logic a 5-minute version of the live
 script would use, for comparison against the 1-minute default.
 
 SIGNAL/STOP/TARGET: identical to live/macd_histogram_1min_live.py --
-    - MACD(12,26,9) reseeded FRESH every trading day (an SMA seed on
-      that day's own candles, matching the live script after its
-      "revert back to daily calculation" change -- NOT a
-      continuously-running EMA across days, unlike
-      macd_histogram_zero_cross_options.py's 5-minute version).
+    - MACD(12,26,9) reseeded FRESH every trading day by default (an
+      SMA seed on that day's own candles, matching the live script
+      after its "revert back to daily calculation" change). Pass
+      continuous=True to instead run ONE EMA across the whole
+      from_date/to_date range -- matching
+      macd_histogram_zero_cross_options.py's 5-minute module -- so the
+      daily SMA-reseed warm-up (~35 bars every morning, a much bigger
+      bite out of a 5-minute day than a 1-minute one) doesn't starve
+      the signal of any real trading time before continuing it across
+      days. Either way, POSITION state (and the entry scan) still
+      resets at each day boundary and force-flattens at
+      FORCE_FLAT_TIME -- continuous only affects the indicator's own
+      warm-up, never carries a position overnight.
     - Fresh cross <=0->>0 buys ATM CE; >=0-><0 buys ATM PE.
     - Dual-condition stop-loss, mirrored by direction (see the live
       script's own docstring for the exact rule).
@@ -61,6 +69,7 @@ def run(
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
     candle_minutes: int = 1,
+    continuous: bool = False,
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
@@ -93,118 +102,155 @@ def run(
     def _fill(candles, at_time_str):
         return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
 
-    trades: list[OptionTrade] = []
+    def _hist(bar_closes: list[float]) -> list[float | None]:
+        macd_line, signal_line = _macd(bar_closes, macd_fast, macd_slow, macd_signal)
+        return [(m - s) if (m is not None and s is not None) else None for m, s in zip(macd_line, signal_line)]
 
-    for day in trading_days:
-        d = day["date"]
-        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
-        if len(rows_1min) < 2:
+    # Build the combined bars/histogram arrays. continuous=True computes ONE
+    # EMA warm-up across the whole range (position state still resets daily
+    # in the main loop below); continuous=False (default, matches the live
+    # script) recomputes a fresh SMA-seeded histogram for each day and
+    # concatenates the per-day results.
+    bars: list[list] = []
+    histogram: list[float | None] = []
+    if continuous:
+        all_1min: list[list] = []
+        for day in trading_days:
+            d = day["date"]
+            all_1min.extend(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False))
+        all_1min.sort(key=lambda r: r[0])
+        if len(all_1min) < 2:
+            return []
+        bars = _resample(all_1min, candle_minutes) if candle_minutes > 1 else all_1min
+        histogram = _hist([b[4] for b in bars])
+    else:
+        for day in trading_days:
+            d = day["date"]
+            rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+            if len(rows_1min) < 2:
+                continue
+            day_bars = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
+            if len(day_bars) < 2:
+                continue
+            bars.extend(day_bars)
+            histogram.extend(_hist([b[4] for b in day_bars]))
+
+    if len(bars) < 2:
+        return []
+
+    trades: list[OptionTrade] = []
+    i = 0
+    prev_hist = None
+    current_day = None
+    while i < len(bars):
+        ts = bars[i][0]
+        d = ts[:10]
+        time_str = ts[11:16]
+        hist = histogram[i]
+
+        if d != current_day:
+            current_day = d
+            prev_hist = None  # never carry a cross-day artifact into a fresh trading day
+
+        if time_str >= FORCE_FLAT_TIME:
+            prev_hist = hist
+            i += 1
             continue
-        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
-        if len(rows) < 2:
+
+        if hist is None:
+            prev_hist = hist
+            i += 1
             continue
-        closes = [r[4] for r in rows]
-        macd_line, signal_line = _macd(closes, macd_fast, macd_slow, macd_signal)
-        histogram = [(m - s) if (m is not None and s is not None) else None for m, s in zip(macd_line, signal_line)]
+        if prev_hist is None:
+            prev_hist = hist
+            i += 1
+            continue
+        if prev_hist <= 0 and hist > 0:
+            direction_label, opt_type = "LONG", "CE"
+        elif prev_hist >= 0 and hist < 0:
+            direction_label, opt_type = "SHORT", "PE"
+        else:
+            prev_hist = hist
+            i += 1
+            continue
 
         expiry = next((e for e in expiries if e >= d), None)
         if expiry is None:
+            prev_hist = hist
+            i += 1
             continue
 
-        i = 0
-        prev_hist = None
-        while i < len(rows):
-            ts = rows[i][0]
-            time_str = ts[11:16]
-            hist = histogram[i]
+        entry_idx = i
+        entry_close = bars[entry_idx][4]
+        entry_hist = histogram[entry_idx]
+        entry_ts = bars[entry_idx][0]
+        atm = oc.round_to_step(entry_close, strike_step)
 
-            if time_str >= FORCE_FLAT_TIME:
-                break  # nothing left to do today -- any position was already closed inline below
+        contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
+        if contract is None or not opt_rows:
+            i = entry_idx + 1
+            prev_hist = hist
+            continue
 
-            if hist is None:
-                prev_hist = hist
-                i += 1
-                continue
-            if prev_hist is None:
-                prev_hist = hist
-                i += 1
-                continue
-            if prev_hist <= 0 and hist > 0:
-                direction_label, opt_type = "LONG", "CE"
-            elif prev_hist >= 0 and hist < 0:
-                direction_label, opt_type = "SHORT", "PE"
-            else:
-                prev_hist = hist
-                i += 1
-                continue
+        entry_bar = _fill(opt_rows, time_str)
+        if entry_bar is None:
+            i = entry_idx + 1
+            prev_hist = hist
+            continue
+        entry_price = _apply_slippage(entry_bar[4], "BUY", slippage_pct)
+        lot_size = contract["lot_size"]
 
-            entry_idx = i
-            entry_close = rows[entry_idx][4]
-            entry_hist = histogram[entry_idx]
-            entry_ts = rows[entry_idx][0]
-            atm = oc.round_to_step(entry_close, strike_step)
-
-            contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
-            if contract is None or not opt_rows:
-                i = entry_idx + 1
-                prev_hist = hist
-                continue
-
-            entry_bar = _fill(opt_rows, time_str)
-            if entry_bar is None:
-                i = entry_idx + 1
-                prev_hist = hist
-                continue
-            entry_price = _apply_slippage(entry_bar[4], "BUY", slippage_pct)
-            lot_size = contract["lot_size"]
-
-            ref_close, ref_hist = entry_close, entry_hist
-            peak_pnl_per_lot = 0.0
-            trailing_active = False
-            exit_idx = None
-            exit_reason = None
-            for j in range(entry_idx + 1, len(rows)):
-                j_time_str = rows[j][0][11:16]
-                if j_time_str >= FORCE_FLAT_TIME:
-                    exit_idx = j
-                    exit_reason = "eod"
-                    break
-                c = rows[j][4]
-                h = histogram[j]
-                if h is None:
-                    continue
-                bar_j = _fill(opt_rows, j_time_str)
-                premium_j = bar_j[4] if bar_j else entry_price
-                pnl_per_lot = (premium_j - entry_price) * lot_size
-                if pnl_per_lot > peak_pnl_per_lot:
-                    peak_pnl_per_lot = pnl_per_lot
-                    if peak_pnl_per_lot >= target_rs:
-                        trailing_active = True
-                        ref_close, ref_hist = c, h
-                is_long = direction_label == "LONG"
-                stop_hit = (c < ref_close and h < ref_hist) if is_long else (c > ref_close and h > ref_hist)
-                if stop_hit:
-                    exit_idx = j
-                    exit_reason = "trailing_stop" if trailing_active else "stop_loss"
-                    break
-
-            if exit_idx is None:
-                exit_idx = len(rows) - 1
+        ref_close, ref_hist = entry_close, entry_hist
+        peak_pnl_per_lot = 0.0
+        trailing_active = False
+        exit_idx = None
+        exit_reason = None
+        for j in range(entry_idx + 1, len(bars)):
+            if bars[j][0][:10] != d:
+                exit_idx = j - 1
                 exit_reason = "eod"
+                break
+            j_time_str = bars[j][0][11:16]
+            if j_time_str >= FORCE_FLAT_TIME:
+                exit_idx = j
+                exit_reason = "eod"
+                break
+            c = bars[j][4]
+            h = histogram[j]
+            if h is None:
+                continue
+            bar_j = _fill(opt_rows, j_time_str)
+            premium_j = bar_j[4] if bar_j else entry_price
+            pnl_per_lot = (premium_j - entry_price) * lot_size
+            if pnl_per_lot > peak_pnl_per_lot:
+                peak_pnl_per_lot = pnl_per_lot
+                if peak_pnl_per_lot >= target_rs:
+                    trailing_active = True
+                    ref_close, ref_hist = c, h
+            is_long = direction_label == "LONG"
+            stop_hit = (c < ref_close and h < ref_hist) if is_long else (c > ref_close and h > ref_hist)
+            if stop_hit:
+                exit_idx = j
+                exit_reason = "trailing_stop" if trailing_active else "stop_loss"
+                break
 
-            exit_time_str = rows[exit_idx][0][11:16]
-            exit_bar = _fill(opt_rows, exit_time_str)
-            exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
-            exit_time = exit_bar[0] if exit_bar else rows[exit_idx][0]
+        if exit_idx is None:
+            exit_idx = len(bars) - 1
+            exit_reason = "eod"
 
-            trades.append(OptionTrade(
-                date=d, direction=direction_label, expiry=expiry, strike=contract["strike_price"],
-                entry_time=entry_ts, entry_premium=entry_price, exit_time=exit_time, exit_premium=exit_price,
-                lot_size=lot_size, exit_reason=exit_reason,
-            ))
+        exit_time_str = bars[exit_idx][0][11:16]
+        exit_bar = _fill(opt_rows, exit_time_str)
+        exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
+        exit_time = exit_bar[0] if exit_bar else bars[exit_idx][0]
 
-            i = exit_idx + 1
-            prev_hist = histogram[exit_idx] if exit_idx < len(histogram) else hist
+        trades.append(OptionTrade(
+            date=d, direction=direction_label, expiry=expiry, strike=contract["strike_price"],
+            entry_time=entry_ts, entry_premium=entry_price, exit_time=exit_time, exit_premium=exit_price,
+            lot_size=lot_size, exit_reason=exit_reason,
+        ))
+
+        i = exit_idx + 1
+        prev_hist = histogram[exit_idx] if exit_idx < len(histogram) else hist
 
     return trades
 
