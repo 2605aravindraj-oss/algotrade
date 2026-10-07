@@ -27,10 +27,19 @@ SIGNAL/STOP/TARGET: identical to live/macd_histogram_1min_live.py --
       script's own docstring for the exact rule).
     - target_rs (default 150.0): once peak P&L/lot first reaches it,
       the stop reference starts trailing to each new peak.
-Each bar's own timestamp doubles as both the signal decision point and
-the fill reference (its own close), exactly as the live script treats
-"filled at the crossing candle's own close" -- same convention at any
-candle_minutes, not just 1.
+Each bar's own CLOSE time doubles as both the signal decision point and
+the fill reference, exactly as the live script treats "filled at the
+crossing candle's own close". At candle_minutes=1 that's just the bar's
+own timestamp (no resampling happens). At candle_minutes>1, _resample
+labels each bar by its bucket START, not its close -- so every fill
+(entry, exit, and each bar's P&L/stop check while a position is open)
+and the FORCE_FLAT_TIME cutoff go through _decision_time(), which adds
+candle_minutes to the bar's label first. Skipping this would be a
+genuine look-ahead (pricing a trade as if at a moment before the very
+bar that triggered it had finished forming) -- the same bug
+macd_histogram_zero_cross_options.py's decision_time_str already
+guards against, which an earlier version of this module's
+candle_minutes generalization failed to carry over.
 
 Other differences from the live script: this also force-flattens any
 still-open position at FORCE_FLAT_TIME (15:25) at day end (the live
@@ -102,6 +111,24 @@ def run(
     def _fill(candles, at_time_str):
         return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
 
+    def _decision_time(ts: str) -> str:
+        """_resample labels a multi-minute bar by its bucket START, but
+        that bar's own close (and the histogram built from it) isn't
+        actually known until candle_minutes later -- any option fill or
+        FORCE_FLAT_TIME check must use THIS time, or it's a look-ahead:
+        pricing a trade as if at a moment before the very bar that
+        triggered it has finished forming. At candle_minutes<=1 bars are
+        the raw, already-closed 1-minute candles (no resampling happens),
+        so this correctly reduces to the bar's own timestamp, matching
+        live/macd_histogram_1min_live.py's "filled at the crossing
+        candle's own close" convention exactly -- same pattern
+        macd_histogram_zero_cross_options.py already uses."""
+        if candle_minutes <= 1:
+            return ts[11:16]
+        hh, mm = int(ts[11:13]), int(ts[14:16])
+        dh, dm = divmod(hh * 60 + mm + candle_minutes, 60)
+        return f"{dh:02d}:{dm:02d}"
+
     def _hist(bar_closes: list[float]) -> list[float | None]:
         macd_line, signal_line = _macd(bar_closes, macd_fast, macd_slow, macd_signal)
         return [(m - s) if (m is not None and s is not None) else None for m, s in zip(macd_line, signal_line)]
@@ -145,14 +172,14 @@ def run(
     while i < len(bars):
         ts = bars[i][0]
         d = ts[:10]
-        time_str = ts[11:16]
+        decision_time_str = _decision_time(ts)
         hist = histogram[i]
 
         if d != current_day:
             current_day = d
             prev_hist = None  # never carry a cross-day artifact into a fresh trading day
 
-        if time_str >= FORCE_FLAT_TIME:
+        if decision_time_str >= FORCE_FLAT_TIME:
             prev_hist = hist
             i += 1
             continue
@@ -192,7 +219,7 @@ def run(
             prev_hist = hist
             continue
 
-        entry_bar = _fill(opt_rows, time_str)
+        entry_bar = _fill(opt_rows, decision_time_str)
         if entry_bar is None:
             i = entry_idx + 1
             prev_hist = hist
@@ -210,8 +237,8 @@ def run(
                 exit_idx = j - 1
                 exit_reason = "eod"
                 break
-            j_time_str = bars[j][0][11:16]
-            if j_time_str >= FORCE_FLAT_TIME:
+            j_decision_time_str = _decision_time(bars[j][0])
+            if j_decision_time_str >= FORCE_FLAT_TIME:
                 exit_idx = j
                 exit_reason = "eod"
                 break
@@ -219,7 +246,7 @@ def run(
             h = histogram[j]
             if h is None:
                 continue
-            bar_j = _fill(opt_rows, j_time_str)
+            bar_j = _fill(opt_rows, j_decision_time_str)
             premium_j = bar_j[4] if bar_j else entry_price
             pnl_per_lot = (premium_j - entry_price) * lot_size
             if pnl_per_lot > peak_pnl_per_lot:
@@ -238,8 +265,8 @@ def run(
             exit_idx = len(bars) - 1
             exit_reason = "eod"
 
-        exit_time_str = bars[exit_idx][0][11:16]
-        exit_bar = _fill(opt_rows, exit_time_str)
+        exit_decision_time_str = _decision_time(bars[exit_idx][0])
+        exit_bar = _fill(opt_rows, exit_decision_time_str)
         exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
         exit_time = exit_bar[0] if exit_bar else bars[exit_idx][0]
 
