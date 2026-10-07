@@ -15,17 +15,9 @@ the day and silently dropped every later one, which is the bug this
 fixed; a later version only ever looked for bullish crosses/CE, which
 is the gap this fixes).
 
-SIGNAL: MACD(12,26,9) on the index's own 1-minute closes. The EMA(12),
-EMA(26), and signal EMA(9) are warmed up on HISTORY_DAYS previous
-trading days' 1-minute closes (prepended before today's bars, same
-public historical-candle data bullish_pattern_screener.py uses for the
-index), so they're already converged by the time today's first bar
-arrives -- a continuously-running MACD, matching what a charting
-platform shows, rather than reseeding from an SMA every morning (an
-earlier version of this script did reseed daily, which made its
-values diverge from a live chart for the first ~30-40 minutes after
-the open). Only crosses that occur ON today's own bars are ever
-scanned/traded -- the prior days' bars exist purely for EMA warm-up.
+SIGNAL: MACD(12,26,9) on the index's own 1-minute closes (continuous
+through today's bars so far -- needs the standard 12/26/9 EMA warm-up,
+~34 bars/34 minutes before the first real histogram value).
   - A fresh cross from <=0 to >0 (not merely "is positive") opens a
     LONG/CE trade: buy the ATM CE, filled at that candle's own close.
   - A fresh cross from >=0 to <0 opens a SHORT/PE trade: buy the ATM
@@ -84,24 +76,13 @@ from io import BytesIO
 
 import requests
 
-from data_sources import cache, upstox_client
+from data_sources import upstox_client
 from backtest.technical_rating import _macd
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 MASTER_URL = "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 IST = timezone(timedelta(hours=5, minutes=30))
 FORCE_FLAT_TIME = "15:25"
-HISTORY_DAYS = 3  # trading days of 1-minute closes prepended before today, purely to warm up the EMA(12)/EMA(26)/signal-EMA(9) so MACD is continuous (not reseeded each morning)
-
-
-def _recent_trading_days(n: int) -> list[str]:
-    """The last n COMPLETED trading days before today (index calendar,
-    public daily-history endpoint -- correctly skips weekends/holidays)."""
-    import datetime as _dt
-    today = _dt.date.today()
-    lookback_from = (today - _dt.timedelta(days=n * 3 + 5)).isoformat()
-    days = upstox_client.get_daily_history(UNDERLYING_KEY, lookback_from, (today - _dt.timedelta(days=1)).isoformat())
-    return [d["date"] for d in days[-n:]]
 
 
 def _load_master() -> list[dict]:
@@ -129,29 +110,18 @@ def _round_to_50(x: float) -> int:
 
 
 def run(target_rs: float = 150.0) -> dict:
-    today_rows = sorted(upstox_client.get_intraday_candles(UNDERLYING_KEY, "1minute"), key=lambda r: r[0])
-    if not today_rows:
-        return {"status": "insufficient_data", "bars_so_far": 0, "trades": []}
-
-    history_rows: list[list] = []
-    for d in _recent_trading_days(HISTORY_DAYS):
-        history_rows.extend(cache.get_day_candles_cached(UNDERLYING_KEY, "1minute", d, expired=False))
-    history_rows.sort(key=lambda r: r[0])
-
-    rows = history_rows + today_rows  # history is for EMA warm-up only -- crosses are only ever scanned from today_start_idx onward
-    today_start_idx = len(history_rows)
+    rows = sorted(upstox_client.get_intraday_candles(UNDERLYING_KEY, "1minute"), key=lambda r: r[0])
+    if len(rows) < 35:
+        return {"status": "insufficient_data", "bars_so_far": len(rows), "trades": []}
 
     closes = [r[4] for r in rows]
     macd_line, signal_line = _macd(closes, 12, 26, 9)
     histogram = [(m - s) if (m is not None and s is not None) else None for m, s in zip(macd_line, signal_line)]
 
-    if today_start_idx > 0 and histogram[today_start_idx - 1] is None:
-        return {"status": "insufficient_data", "bars_so_far": len(today_rows), "trades": []}
-
     master = None  # lazy-loaded only once a first signal actually fires
     trades: list[dict] = []
-    i = today_start_idx
-    prev_hist = histogram[today_start_idx - 1] if today_start_idx > 0 else None
+    i = 0
+    prev_hist = None
     while i < len(rows):
         hist = histogram[i]
         if hist is None:
@@ -334,12 +304,7 @@ def _trade_summary(trade: dict) -> str:
 def summary(result: dict) -> str:
     status = result.get("status")
     if status == "insufficient_data":
-        if result["bars_so_far"] == 0:
-            return "No candles for today yet -- market may not have opened. Check back later."
-        return (
-            f"Only {result['bars_so_far']} bars today, and the {HISTORY_DAYS}-day EMA warm-up "
-            "history couldn't produce a real histogram value either -- check back later."
-        )
+        return f"Only {result['bars_so_far']} bars so far today -- MACD(12,26,9) needs ~35 to produce a real histogram value. Check back later."
     if status == "no_signal_yet":
         return f"No histogram zero-cross yet today ({result['bars_so_far']} bars so far)."
 
