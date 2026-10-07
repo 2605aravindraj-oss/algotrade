@@ -22,13 +22,23 @@ entry only resumes after the current one's stop triggers.
 
 STOP-LOSS (as specified -- a dual condition, not price alone and not
 histogram alone): the first LATER candle whose close is BELOW the
-entry candle's own close AND whose histogram is BELOW the entry
-candle's own histogram value. Both must hold on the same candle.
-Requiring both avoids a single noisy wick (price dips but momentum
-hasn't actually weakened, or vice versa) stopping the trade out.
+REFERENCE candle's own close AND whose histogram is BELOW the
+reference candle's own histogram value. Both must hold on the same
+candle. Requiring both avoids a single noisy wick (price dips but
+momentum hasn't actually weakened, or vice versa) stopping the trade
+out. The reference starts as the entry candle itself.
 
-No target specified -- holds until the stop triggers or the market
-closes (forced-flat, read from the last available candle of the day).
+TARGET + TRAILING (target_rs, default 150.0): once unrealized P&L
+for one lot (option premium move x lot_size) first reaches +Rs150,
+the stop-loss REFERENCE switches from the fixed entry candle to the
+candle that just set that new peak, and keeps ratcheting forward to
+whichever later candle sets a new peak P&L after that -- the dual
+stop condition above is then checked against this trailing
+reference instead of the entry. This locks in progressively more
+gain without capping the upside at a flat Rs150 exit: the trade can
+keep running as long as price and histogram don't BOTH fall back
+below the latest peak candle. Before the first time Rs150 is
+reached, the stop is anchored to the entry candle exactly as before.
 
 STRIKE/EXPIRY: ATM = round-to-50 of the index close at the entry
 candle; nearest weekly expiry today, resolved from Upstox's live
@@ -84,7 +94,7 @@ def _round_to_50(x: float) -> int:
     return int(round(x / 50) * 50)
 
 
-def run() -> dict:
+def run(target_rs: float = 150.0) -> dict:
     rows = sorted(upstox_client.get_intraday_candles(UNDERLYING_KEY, "1minute"), key=lambda r: r[0])
     if len(rows) < 35:
         return {"status": "insufficient_data", "bars_so_far": len(rows), "trades": []}
@@ -115,16 +125,6 @@ def run() -> dict:
         entry_hist = histogram[entry_idx]
         entry_ts = entry_row[0]
 
-        exit_idx = None
-        for j in range(entry_idx + 1, len(rows)):
-            c = rows[j][4]
-            h = histogram[j]
-            if h is None:
-                continue
-            if c < entry_close and h < entry_hist:
-                exit_idx = j
-                break
-
         if master is None:
             master = _load_master()
         atm = _round_to_50(entry_close)
@@ -132,16 +132,16 @@ def run() -> dict:
         if contract is None:
             trades.append({"status": "error", "message": "could not resolve a live NIFTY CE contract",
                             "entry_time": entry_ts})
-            i = (exit_idx + 1) if exit_idx is not None else len(rows)
-            prev_hist = histogram[exit_idx] if exit_idx is not None else hist
+            i = entry_idx + 1
+            prev_hist = hist
             continue
 
         opt_rows = sorted(upstox_client.get_intraday_candles(contract["instrument_key"], "1minute"), key=lambda r: r[0])
         if not opt_rows:
             trades.append({"status": "error", "message": "no intraday candles yet for the resolved CE contract",
                             "entry_time": entry_ts, "trading_symbol": contract["trading_symbol"]})
-            i = (exit_idx + 1) if exit_idx is not None else len(rows)
-            prev_hist = histogram[exit_idx] if exit_idx is not None else hist
+            i = entry_idx + 1
+            prev_hist = hist
             continue
 
         def _premium_at_or_after(ts_target: str, rows_=opt_rows) -> tuple[str, float]:
@@ -151,6 +151,33 @@ def run() -> dict:
             return rows_[-1][0], rows_[-1][4]
 
         entry_time, entry_premium = _premium_at_or_after(entry_ts)
+        lot_size = contract.get("lot_size") or 1
+
+        # scan forward for the exit: dual-condition stop, anchored to the
+        # entry candle until peak P&L/lot first reaches target_rs, then
+        # re-anchored ("trailed") to whichever later candle sets each new
+        # peak after that.
+        ref_close, ref_hist = entry_close, entry_hist
+        peak_pnl_per_lot = 0.0
+        trailing_active = False
+        exit_idx = None
+        exit_reason = None
+        for j in range(entry_idx + 1, len(rows)):
+            c = rows[j][4]
+            h = histogram[j]
+            if h is None:
+                continue
+            _, premium_j = _premium_at_or_after(rows[j][0])
+            pnl_per_lot = (premium_j - entry_premium) * lot_size
+            if pnl_per_lot > peak_pnl_per_lot:
+                peak_pnl_per_lot = pnl_per_lot
+                if peak_pnl_per_lot >= target_rs:
+                    trailing_active = True
+                    ref_close, ref_hist = c, h
+            if c < ref_close and h < ref_hist:
+                exit_idx = j
+                exit_reason = "trailing_stop" if trailing_active else "stop_loss"
+                break
 
         trade = {
             "status": "open" if exit_idx is None else "stopped_out",
@@ -162,6 +189,8 @@ def run() -> dict:
             "instrument_key": contract["instrument_key"],
             "entry_premium_time": entry_time,
             "entry_premium": entry_premium,
+            "lot_size": lot_size,
+            "target_rs": target_rs,
         }
 
         if exit_idx is not None:
@@ -169,22 +198,31 @@ def run() -> dict:
             exit_index_close = rows[exit_idx][4]
             exit_hist = histogram[exit_idx]
             exit_time, exit_premium = _premium_at_or_after(exit_ts)
+            pnl_per_unit = round(exit_premium - entry_premium, 2)
             trade.update({
                 "exit_time": exit_ts,
                 "exit_index_close": exit_index_close,
                 "exit_histogram": exit_hist,
                 "exit_premium_time": exit_time,
                 "exit_premium": exit_premium,
-                "exit_reason": "stop_loss",
-                "pnl_per_unit": round(exit_premium - entry_premium, 2),
+                "exit_reason": exit_reason,
+                "pnl_per_unit": pnl_per_unit,
+                "pnl_per_lot": round(pnl_per_unit * lot_size, 2),
+                "peak_pnl_per_lot": round(peak_pnl_per_lot, 2),
+                "trailing_was_active": trailing_active,
             })
         else:
             last_ts, last_premium = opt_rows[-1][0], opt_rows[-1][4]
+            unrealized_pnl_per_lot = round((last_premium - entry_premium) * lot_size, 2)
             trade.update({
                 "latest_time": last_ts,
                 "latest_premium": last_premium,
                 "unrealized_pnl_per_unit": round(last_premium - entry_premium, 2),
-                "lot_size": contract.get("lot_size"),
+                "unrealized_pnl_per_lot": unrealized_pnl_per_lot,
+                "peak_pnl_per_lot": round(peak_pnl_per_lot, 2),
+                "trailing_active": trailing_active,
+                "trailing_ref_close": ref_close if trailing_active else None,
+                "trailing_ref_histogram": ref_hist if trailing_active else None,
             })
 
         trades.append(trade)
@@ -206,21 +244,30 @@ def _trade_summary(trade: dict) -> str:
         f"  Entry {trade['entry_time']} IST: spot close={trade['entry_index_close']:.2f}, "
         f"histogram={trade['entry_histogram']:.2f}",
         f"    Bought {trade['trading_symbol']} (strike {trade['strike']:.0f}) @ {trade['entry_premium']:.2f} "
-        f"(fill {trade['entry_premium_time']})",
+        f"(fill {trade['entry_premium_time']}, lot size {trade['lot_size']})",
     ]
     if trade["status"] == "stopped_out":
+        ref_kind = "TRAILED reference (peak after target hit)" if trade["trailing_was_active"] else "entry reference"
         lines.append(
-            f"    STOPPED at {trade['exit_time']} IST: spot close={trade['exit_index_close']:.2f} < entry "
-            f"AND histogram={trade['exit_histogram']:.2f} < entry histogram"
+            f"    STOPPED ({trade['exit_reason']}) at {trade['exit_time']} IST: spot close="
+            f"{trade['exit_index_close']:.2f} < {ref_kind} AND histogram={trade['exit_histogram']:.2f} < it, "
+            f"both on the same bar"
         )
         lines.append(
             f"    Exit premium {trade['exit_premium']:.2f} (fill {trade['exit_premium_time']}) -- "
-            f"P&L/unit: {trade['pnl_per_unit']:+.2f}"
+            f"P&L/unit: {trade['pnl_per_unit']:+.2f}  P&L/lot: {trade['pnl_per_lot']:+.2f}  "
+            f"(peak P&L/lot reached: {trade['peak_pnl_per_lot']:+.2f}, target was {trade['target_rs']:.0f})"
         )
     else:
+        trail_note = (
+            f" -- TRAILING ACTIVE (target {trade['target_rs']:.0f} reached, peak {trade['peak_pnl_per_lot']:+.2f}/lot, "
+            f"stop now anchored to spot={trade['trailing_ref_close']:.2f}/hist={trade['trailing_ref_histogram']:.2f})"
+            if trade["trailing_active"] else f" (target {trade['target_rs']:.0f}/lot not yet reached)"
+        )
         lines.append(
             f"    Still OPEN as of {trade['latest_time']} IST: premium={trade['latest_premium']:.2f} -- "
-            f"unrealized P&L/unit: {trade['unrealized_pnl_per_unit']:+.2f} (lot size {trade['lot_size']})"
+            f"unrealized P&L/unit: {trade['unrealized_pnl_per_unit']:+.2f}, P&L/lot: "
+            f"{trade['unrealized_pnl_per_lot']:+.2f}{trail_note}"
         )
     return "\n".join(lines)
 
@@ -234,14 +281,18 @@ def summary(result: dict) -> str:
 
     trades = result["trades"]
     closed = [t for t in trades if t.get("status") == "stopped_out"]
-    total_pnl = sum(t["pnl_per_unit"] for t in closed)
+    total_pnl_unit = sum(t["pnl_per_unit"] for t in closed)
+    total_pnl_lot = sum(t["pnl_per_lot"] for t in closed)
     header = f"{len(trades)} signal(s) today so far:"
     lines = [header, ""]
     for t in trades:
         lines.append(_trade_summary(t))
         lines.append("")
     if closed:
-        lines.append(f"Closed trades: {len(closed)}, total P&L/unit so far: {total_pnl:+.2f}")
+        lines.append(
+            f"Closed trades: {len(closed)}, total P&L/unit so far: {total_pnl_unit:+.2f}, "
+            f"total P&L/lot: {total_pnl_lot:+.2f}"
+        )
     return "\n".join(lines).rstrip()
 
 
