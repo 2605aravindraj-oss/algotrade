@@ -77,6 +77,29 @@ def _conn():
 def get_expired_expiries_cached(
     underlying_key: str, expiry_type: str = "options", access_token: str | None = None
 ) -> list[str]:
+    """Unlike every other get_*_cached function here, this always tries a
+    fresh fetch first (when access_token is given) and merges it into the
+    cache, rather than trusting a cache hit forever -- a NEW contract
+    expires every week, so a plain "if cached: return cached" would freeze
+    this list at whatever it was the first time it was ever populated and
+    silently never see any contract that has expired since (caught live:
+    a cache first populated around 2026-09-29 stayed stuck there for over
+    a week, making every backtest for 2026-09-30 onward silently resolve
+    no expiry and trade zero days). Falls back to whatever is cached if
+    the live fetch fails or no token is given."""
+    fresh: list[str] | None = None
+    if access_token:
+        try:
+            fresh = upstox_client.get_expired_expiries(underlying_key, expiry_type, access_token)
+        except Exception:
+            fresh = None
+    if fresh:
+        with _conn() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO expiries VALUES (?,?,?)",
+                [(underlying_key, expiry_type, e) for e in fresh],
+            )
+
     with _conn() as conn:
         rows = conn.execute(
             "SELECT expiry FROM expiries WHERE underlying_key=? AND expiry_type=? ORDER BY expiry",
@@ -85,13 +108,7 @@ def get_expired_expiries_cached(
         if rows:
             return [r[0] for r in rows]
 
-    expiries = upstox_client.get_expired_expiries(underlying_key, expiry_type, access_token)
-    with _conn() as conn:
-        conn.executemany(
-            "INSERT OR IGNORE INTO expiries VALUES (?,?,?)",
-            [(underlying_key, expiry_type, e) for e in expiries],
-        )
-    return expiries
+    return fresh or []
 
 
 def get_expired_option_chain_cached(
