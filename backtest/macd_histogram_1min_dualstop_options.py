@@ -82,10 +82,16 @@ def run(
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
+    min_histogram_buffer: float = 0.0,
     target_rs: float = 150.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    """min_histogram_buffer: same entry filter as
+    macd_histogram_zero_cross_options.py -- requires the histogram to
+    clear this many index points PAST zero (not merely cross it) before
+    counting as a real signal (prev_hist <= -buffer and hist > buffer for
+    a LONG, mirrored for SHORT). 0.0 (default) is the literal zero-cross."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -192,9 +198,9 @@ def run(
             prev_hist = hist
             i += 1
             continue
-        if prev_hist <= 0 and hist > 0:
+        if prev_hist <= -min_histogram_buffer and hist > min_histogram_buffer:
             direction_label, opt_type = "LONG", "CE"
-        elif prev_hist >= 0 and hist < 0:
+        elif prev_hist >= min_histogram_buffer and hist < -min_histogram_buffer:
             direction_label, opt_type = "SHORT", "PE"
         else:
             prev_hist = hist
