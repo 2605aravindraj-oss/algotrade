@@ -105,12 +105,15 @@ def run(
     macd_signal: int = 9,
     peak_window: int = 1,
     require_confirmation_candle: bool = False,
+    require_neckline_breakout: bool = False,
     confirmation_stale_bars: int = 10,
     sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    if require_confirmation_candle and require_neckline_breakout:
+        raise ValueError("require_confirmation_candle and require_neckline_breakout are mutually exclusive")
     """candle_minutes (default 1): resamples each day's 1-minute index
     candles to this bar size first -- e.g. candle_minutes=5 replays the
     same hump/divergence logic a 5-minute version would use.
@@ -133,7 +136,20 @@ def run(
     within confirmation_stale_bars bars; a newer divergence of either
     direction replaces whatever was still pending. False (default)
     preserves the original "enter immediately on confirmation"
-    behaviour."""
+    behaviour.
+
+    require_neckline_breakout (default False): the macd_divergence_
+    double_bottom_options.py style of confirmation instead -- the
+    "neckline" is the price extreme BETWEEN the two peaks/troughs
+    being compared (the lowest low in between for a bearish/SHORT
+    divergence, i.e. the pullback low between the two momentum
+    peaks; the highest high in between for a bullish/LONG divergence,
+    i.e. the bounce high between the two troughs). The trade only
+    fires once a later bar's close actually breaks that level (below
+    it for SHORT, above it for LONG), not merely on the next candle's
+    direction. Mutually exclusive with require_confirmation_candle;
+    same confirmation_stale_bars expiry and newer-divergence-replaces
+    -pending behaviour."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -197,6 +213,7 @@ def run(
         last_trough: tuple[int, float, float] | None = None  # (idx, hist_value, price_low)
         pending_direction: str | None = None  # "LONG" or "SHORT", awaiting a confirmation candle
         pending_since_idx: int | None = None
+        pending_neckline: float | None = None  # only used when require_neckline_breakout
 
         def _open_position(i: int, direction_label: str) -> dict | None:
             opt_type = "CE" if direction_label == "LONG" else "PE"
@@ -266,6 +283,23 @@ def run(
                         pending_direction = None
                         pending_since_idx = None
 
+            # -- neckline-breakout check for a pending signal (only when enabled) --
+            if require_neckline_breakout and pending_direction is not None and position is None:
+                if i - pending_since_idx > confirmation_stale_bars:
+                    pending_direction = None
+                    pending_since_idx = None
+                    pending_neckline = None
+                else:
+                    broken = (
+                        (pending_direction == "LONG" and bars[i].c > pending_neckline)
+                        or (pending_direction == "SHORT" and bars[i].c < pending_neckline)
+                    )
+                    if broken:
+                        position = _open_position(i, pending_direction)
+                        pending_direction = None
+                        pending_since_idx = None
+                        pending_neckline = None
+
             # -- hump/divergence tracking, every bar, regardless of position state --
             h = histogram[i]
             if h is not None and h != 0:
@@ -286,9 +320,12 @@ def run(
                     if hump_sign == 1 and val_mid == max(values) and values.count(val_mid) == 1:
                         price_high_mid = bars[idx_mid].h
                         if last_peak is not None:
-                            _, prev_val, prev_price_high = last_peak
+                            idx_prev, prev_val, prev_price_high = last_peak
                             if val_mid < prev_val and price_high_mid >= prev_price_high and position is None:
-                                if require_confirmation_candle:
+                                if require_neckline_breakout:
+                                    pending_direction, pending_since_idx = "SHORT", i
+                                    pending_neckline = min(b.l for b in bars[idx_prev:idx_mid + 1])
+                                elif require_confirmation_candle:
                                     pending_direction, pending_since_idx = "SHORT", i
                                 else:
                                     position = _open_position(i, "SHORT")
@@ -297,9 +334,12 @@ def run(
                     elif hump_sign == -1 and val_mid == min(values) and values.count(val_mid) == 1:
                         price_low_mid = bars[idx_mid].l
                         if last_trough is not None:
-                            _, prev_val, prev_price_low = last_trough
+                            idx_prev, prev_val, prev_price_low = last_trough
                             if val_mid > prev_val and price_low_mid <= prev_price_low and position is None:
-                                if require_confirmation_candle:
+                                if require_neckline_breakout:
+                                    pending_direction, pending_since_idx = "LONG", i
+                                    pending_neckline = max(b.h for b in bars[idx_prev:idx_mid + 1])
+                                elif require_confirmation_candle:
                                     pending_direction, pending_since_idx = "LONG", i
                                 else:
                                     position = _open_position(i, "LONG")
