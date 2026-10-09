@@ -1,10 +1,17 @@
-"""Backtest: NIFTY 50 spot 1-minute candles, buy ATM PE on a BEARISH MACD
-histogram divergence, buy ATM CE on a BULLISH one -- through real ATM
-NIFTY options, with a fixed rupee stop-loss/target. This is the classic
-"two peaks/troughs of the histogram, same side of zero, no crossover in
-between" divergence read directly off a MACD panel, NOT a price-pivot
-double bottom/top (see macd_divergence_double_bottom_options.py for
-that, different and separate approach).
+"""Backtest: NIFTY 50 spot candles (1-minute by default, any
+candle_minutes), buy ATM PE on a BEARISH MACD histogram divergence, buy
+ATM CE on a BULLISH one -- through real ATM NIFTY options, with a fixed
+rupee stop-loss/target. This is the classic "two peaks/troughs of the
+histogram, same side of zero, no crossover in between" divergence read
+directly off a MACD panel, NOT a price-pivot double bottom/top (see
+macd_divergence_double_bottom_options.py for that, different and
+separate approach).
+
+candle_minutes>1 resamples first; every option fill and the
+FORCE_FLAT_TIME cutoff then go through a _decision_time() helper
+identical to macd_histogram_1min_dualstop_options.py's, since
+_resample labels a multi-minute bar by its bucket start, not its
+close -- the same look-ahead class already fixed there.
 
 HUMPS: the histogram is segmented into maximal runs of bars that stay
 on one side of zero ("humps") -- a positive hump ends the instant the
@@ -66,6 +73,7 @@ from data_sources import cache, upstox_client
 from backtest import options_common as oc
 from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
 from backtest.macd_rsi2_momentum_options import OptionTrade
+from backtest.sweep_reclaim_breakout import _resample
 from backtest.technical_rating import _macd
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
@@ -91,6 +99,7 @@ def run(
     to_date: str,
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
+    candle_minutes: int = 1,
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
@@ -100,7 +109,11 @@ def run(
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
-    """peak_window (default 1): a local peak/trough must be the STRICT
+    """candle_minutes (default 1): resamples each day's 1-minute index
+    candles to this bar size first -- e.g. candle_minutes=5 replays the
+    same hump/divergence logic a 5-minute version would use.
+
+    peak_window (default 1): a local peak/trough must be the STRICT
     max/min over `peak_window` bars on each side (2*peak_window+1 bars
     total), not just its two immediate neighbors -- filters out
     single-bar noise at the cost of confirming peak_window bars later.
@@ -131,11 +144,26 @@ def run(
     def _fill(candles, at_time_str):
         return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
 
+    def _decision_time(ts: str) -> str:
+        """_resample labels a multi-minute bar by its bucket START, not
+        its close -- see the identical helper (and its full rationale)
+        in macd_histogram_1min_dualstop_options.py. At candle_minutes<=1
+        no resampling happens, so this reduces to the bar's own
+        timestamp."""
+        if candle_minutes <= 1:
+            return ts[11:16]
+        hh, mm = int(ts[11:13]), int(ts[14:16])
+        dh, dm = divmod(hh * 60 + mm + candle_minutes, 60)
+        return f"{dh:02d}:{dm:02d}"
+
     trades: list[OptionTrade] = []
 
     for day in trading_days:
         d = day["date"]
-        rows = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        if len(rows_1min) < macd_slow + macd_signal + 5:
+            continue
+        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
         if len(rows) < macd_slow + macd_signal + 5:
             continue
         bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
@@ -154,7 +182,7 @@ def run(
         last_trough: tuple[int, float, float] | None = None  # (idx, hist_value, price_low)
 
         for i in range(len(bars)):
-            time_str = bars[i].ts[11:16]
+            time_str = _decision_time(bars[i].ts)
             if time_str >= FORCE_FLAT_TIME:
                 if position is not None:
                     exit_bar = _fill(position["opt_rows"], time_str)
