@@ -60,6 +60,7 @@ from data_sources import cache, upstox_client
 from backtest import options_common as oc
 from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
 from backtest.macd_rsi2_momentum_options import OptionTrade
+from backtest.sweep_reclaim_breakout import _resample
 
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 ATR_PERIOD = 14
@@ -202,11 +203,29 @@ def run(
     to_date: str,
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
+    candle_minutes: int = 1,
+    pivot_window: int | None = None,
+    pivot_lookback_bars: int | None = None,
     sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    """candle_minutes (default 1): resamples each day's 1-minute index
+    candles to this bar size first -- e.g. candle_minutes=5 replays the
+    same support/resistance + pattern logic a 5-minute version would
+    use. pivot_window/pivot_lookback_bars default to values tuned per
+    timeframe when left unset: pivot_window=5 (left=right bars) and
+    pivot_lookback_bars=120 (~2 hours) at 1-minute; pivot_window=3
+    (matching live/bullish_chart_pattern_screener.py's own 5-minute
+    convention) and pivot_lookback_bars=24 (same ~2-hour span, just
+    fewer, coarser bars) at candle_minutes=5. Pass either explicitly to
+    override."""
+    if pivot_window is None:
+        pivot_window = PIVOT_WINDOW if candle_minutes <= 1 else 3
+    if pivot_lookback_bars is None:
+        pivot_lookback_bars = PIVOT_LOOKBACK_BARS if candle_minutes <= 1 else max(10, round(120 / candle_minutes))
+
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -232,12 +251,28 @@ def run(
     def _fill(candles, at_time_str):
         return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
 
+    def _decision_time(ts: str) -> str:
+        """_resample labels a multi-minute bar by its bucket START, not
+        its close -- see the identical helper (and its full rationale)
+        in macd_histogram_1min_dualstop_options.py. At candle_minutes<=1
+        no resampling happens, so this reduces to the bar's own
+        timestamp."""
+        if candle_minutes <= 1:
+            return ts[11:16]
+        hh, mm = int(ts[11:13]), int(ts[14:16])
+        dh, dm = divmod(hh * 60 + mm + candle_minutes, 60)
+        return f"{dh:02d}:{dm:02d}"
+
     trades: list[OptionTrade] = []
+    min_pivot_bars = 2 * pivot_window + 5
 
     for day in trading_days:
         d = day["date"]
-        rows = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
-        if len(rows) < ATR_PERIOD + 2 * PIVOT_WINDOW + 5:
+        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        if len(rows_1min) < ATR_PERIOD + min_pivot_bars:
+            continue
+        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
+        if len(rows) < ATR_PERIOD + min_pivot_bars:
             continue
         bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
 
@@ -245,11 +280,11 @@ def run(
         if expiry is None:
             continue
 
-        min_i = ATR_PERIOD + PIVOT_WINDOW + 3
+        min_i = ATR_PERIOD + pivot_window + 3
         i = min_i
         while i < len(bars):
-            time_str = bars[i].ts[11:16]
-            if time_str >= FORCE_FLAT_TIME:
+            decision_time_str = _decision_time(bars[i].ts)
+            if decision_time_str >= FORCE_FLAT_TIME:
                 break
 
             atr = _atr_at(bars, i)
@@ -257,7 +292,7 @@ def run(
                 i += 1
                 continue
 
-            support, resistance = _confirmed_pivots(bars, i)
+            support, resistance = _confirmed_pivots(bars, i, left=pivot_window, right=pivot_window, lookback=pivot_lookback_bars)
             direction_label = opt_type = pattern = None
             if support is not None and abs(bars[i].l - support[1]) <= atr * PROXIMITY_ATR_MULT:
                 pattern = _bullish_pattern(bars, i, atr)
@@ -282,7 +317,7 @@ def run(
                 i = entry_idx + 1
                 continue
 
-            entry_bar = _fill(opt_rows, time_str)
+            entry_bar = _fill(opt_rows, decision_time_str)
             if entry_bar is None:
                 i = entry_idx + 1
                 continue
@@ -292,12 +327,12 @@ def run(
             exit_idx = None
             exit_reason = None
             for j in range(entry_idx + 1, len(bars)):
-                j_time_str = bars[j].ts[11:16]
-                if j_time_str >= FORCE_FLAT_TIME:
+                j_decision_time_str = _decision_time(bars[j].ts)
+                if j_decision_time_str >= FORCE_FLAT_TIME:
                     exit_idx = j
                     exit_reason = "eod"
                     break
-                bar_j = _fill(opt_rows, j_time_str)
+                bar_j = _fill(opt_rows, j_decision_time_str)
                 premium_j = bar_j[4] if bar_j else entry_price
                 pnl_per_lot = (premium_j - entry_price) * lot_size
                 if pnl_per_lot <= -sl_rs:
@@ -313,8 +348,8 @@ def run(
                 exit_idx = len(bars) - 1
                 exit_reason = "eod"
 
-            exit_time_str = bars[exit_idx].ts[11:16]
-            exit_bar = _fill(opt_rows, exit_time_str)
+            exit_decision_time_str = _decision_time(bars[exit_idx].ts)
+            exit_bar = _fill(opt_rows, exit_decision_time_str)
             exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
             exit_time = exit_bar[0] if exit_bar else bars[exit_idx].ts
 
