@@ -104,6 +104,8 @@ def run(
     macd_slow: int = 26,
     macd_signal: int = 9,
     peak_window: int = 1,
+    require_confirmation_candle: bool = False,
+    confirmation_stale_bars: int = 10,
     sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
@@ -118,7 +120,20 @@ def run(
     total), not just its two immediate neighbors -- filters out
     single-bar noise at the cost of confirming peak_window bars later.
     peak_window=1 is the literal single-bar definition (the original
-    behaviour)."""
+    behaviour).
+
+    require_confirmation_candle (default False): when True, a
+    confirmed divergence doesn't enter immediately -- it instead waits
+    for the first later bar whose own close clears the PREVIOUS bar's
+    close in the signal's direction (close > previous close for a
+    LONG, < for a SHORT), and enters there instead. This is a plain
+    price-action confirmation on top of the divergence itself (don't
+    buy into a reversal that hasn't actually started moving yet). The
+    pending signal expires (is dropped) if no such candle appears
+    within confirmation_stale_bars bars; a newer divergence of either
+    direction replaces whatever was still pending. False (default)
+    preserves the original "enter immediately on confirmation"
+    behaviour."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -180,6 +195,25 @@ def run(
         hump_bars: list[tuple[int, float]] = []
         last_peak: tuple[int, float, float] | None = None   # (idx, hist_value, price_high)
         last_trough: tuple[int, float, float] | None = None  # (idx, hist_value, price_low)
+        pending_direction: str | None = None  # "LONG" or "SHORT", awaiting a confirmation candle
+        pending_since_idx: int | None = None
+
+        def _open_position(i: int, direction_label: str) -> dict | None:
+            opt_type = "CE" if direction_label == "LONG" else "PE"
+            entry_close = bars[i].c
+            atm = oc.round_to_step(entry_close, strike_step)
+            contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
+            if contract is None or not opt_rows:
+                return None
+            entry_bar = _fill(opt_rows, _decision_time(bars[i].ts))
+            if entry_bar is None:
+                return None
+            return {
+                "direction": direction_label, "strike": contract["strike_price"],
+                "entry_time": bars[i].ts,
+                "entry_price": _apply_slippage(entry_bar[4], "BUY", slippage_pct),
+                "lot_size": contract["lot_size"], "opt_rows": opt_rows,
+            }
 
         for i in range(len(bars)):
             time_str = _decision_time(bars[i].ts)
@@ -217,6 +251,21 @@ def run(
                     ))
                     position = None
 
+            # -- confirmation-candle check for a pending signal (only when enabled) --
+            if require_confirmation_candle and pending_direction is not None and position is None:
+                if i - pending_since_idx > confirmation_stale_bars:
+                    pending_direction = None
+                    pending_since_idx = None
+                elif i >= 1:
+                    confirmed = (
+                        (pending_direction == "LONG" and bars[i].c > bars[i - 1].c)
+                        or (pending_direction == "SHORT" and bars[i].c < bars[i - 1].c)
+                    )
+                    if confirmed:
+                        position = _open_position(i, pending_direction)
+                        pending_direction = None
+                        pending_since_idx = None
+
             # -- hump/divergence tracking, every bar, regardless of position state --
             h = histogram[i]
             if h is not None and h != 0:
@@ -239,19 +288,10 @@ def run(
                         if last_peak is not None:
                             _, prev_val, prev_price_high = last_peak
                             if val_mid < prev_val and price_high_mid >= prev_price_high and position is None:
-                                direction_label, opt_type = "SHORT", "PE"
-                                entry_close = bars[i].c
-                                atm = oc.round_to_step(entry_close, strike_step)
-                                contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
-                                if contract is not None and opt_rows:
-                                    entry_bar = _fill(opt_rows, time_str)
-                                    if entry_bar is not None:
-                                        position = {
-                                            "direction": direction_label, "strike": contract["strike_price"],
-                                            "entry_time": bars[i].ts,
-                                            "entry_price": _apply_slippage(entry_bar[4], "BUY", slippage_pct),
-                                            "lot_size": contract["lot_size"], "opt_rows": opt_rows,
-                                        }
+                                if require_confirmation_candle:
+                                    pending_direction, pending_since_idx = "SHORT", i
+                                else:
+                                    position = _open_position(i, "SHORT")
                         last_peak = (idx_mid, val_mid, price_high_mid)
 
                     elif hump_sign == -1 and val_mid == min(values) and values.count(val_mid) == 1:
@@ -259,19 +299,10 @@ def run(
                         if last_trough is not None:
                             _, prev_val, prev_price_low = last_trough
                             if val_mid > prev_val and price_low_mid <= prev_price_low and position is None:
-                                direction_label, opt_type = "LONG", "CE"
-                                entry_close = bars[i].c
-                                atm = oc.round_to_step(entry_close, strike_step)
-                                contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
-                                if contract is not None and opt_rows:
-                                    entry_bar = _fill(opt_rows, time_str)
-                                    if entry_bar is not None:
-                                        position = {
-                                            "direction": direction_label, "strike": contract["strike_price"],
-                                            "entry_time": bars[i].ts,
-                                            "entry_price": _apply_slippage(entry_bar[4], "BUY", slippage_pct),
-                                            "lot_size": contract["lot_size"], "opt_rows": opt_rows,
-                                        }
+                                if require_confirmation_candle:
+                                    pending_direction, pending_since_idx = "LONG", i
+                                else:
+                                    position = _open_position(i, "LONG")
                         last_trough = (idx_mid, val_mid, price_low_mid)
 
         # any position still open at the very end of the day's bars (shouldn't
