@@ -15,12 +15,15 @@ tracking state, so a peak from one hump is never compared against a
 peak from the next. This is the "no crossover for finding divergence"
 requirement.
 
-LOCAL PEAK/TROUGH: single-bar, immediate-neighbor definition -- bar k
-(inside a positive hump) is a local peak if histogram[k] > histogram
-[k-1] and histogram[k] > histogram[k+1]; the negative-hump mirror
-defines a local trough. This is only confirmed once bar k+1 is known
-(one bar after k), matching how a trendline drawn on a chart connects
-actual bar tops/bottoms.
+LOCAL PEAK/TROUGH: bar k (inside a positive hump) is a local peak if
+its histogram value is the STRICT max over the peak_window bars on
+each side of it (2*peak_window+1 bars total); the negative-hump
+mirror (strict min) defines a local trough. peak_window=1 (default)
+is the literal single-bar/immediate-neighbor definition -- confirmed
+one bar after k. A larger peak_window filters out single-bar noise
+(at the cost of confirming peak_window bars later), closer to how a
+trendline drawn on a chart connects the visually obvious bar tops/
+bottoms rather than every tiny wiggle.
 
 BEARISH DIVERGENCE (buy ATM PE): within the same still-open positive
 hump, a newly confirmed local peak is LOWER than the previous local
@@ -91,11 +94,18 @@ def run(
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
+    peak_window: int = 1,
     sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    """peak_window (default 1): a local peak/trough must be the STRICT
+    max/min over `peak_window` bars on each side (2*peak_window+1 bars
+    total), not just its two immediate neighbors -- filters out
+    single-bar noise at the cost of confirming peak_window bars later.
+    peak_window=1 is the literal single-bar definition (the original
+    behaviour)."""
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -190,12 +200,13 @@ def run(
                     last_trough = None
                 hump_bars.append((i, h))
 
-                if len(hump_bars) >= 3:
-                    idx_mid, val_mid = hump_bars[-2]
-                    _, val_prev = hump_bars[-3]
-                    _, val_next = hump_bars[-1]
+                window_len = 2 * peak_window + 1
+                if len(hump_bars) >= window_len:
+                    window_slice = hump_bars[-window_len:]
+                    idx_mid, val_mid = window_slice[peak_window]
+                    values = [v for _, v in window_slice]
 
-                    if hump_sign == 1 and val_mid > val_prev and val_mid > val_next:
+                    if hump_sign == 1 and val_mid == max(values) and values.count(val_mid) == 1:
                         price_high_mid = bars[idx_mid].h
                         if last_peak is not None:
                             _, prev_val, prev_price_high = last_peak
@@ -215,7 +226,7 @@ def run(
                                         }
                         last_peak = (idx_mid, val_mid, price_high_mid)
 
-                    elif hump_sign == -1 and val_mid < val_prev and val_mid < val_next:
+                    elif hump_sign == -1 and val_mid == min(values) and values.count(val_mid) == 1:
                         price_low_mid = bars[idx_mid].l
                         if last_trough is not None:
                             _, prev_val, prev_price_low = last_trough
