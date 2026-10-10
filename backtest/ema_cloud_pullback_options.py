@@ -1,30 +1,40 @@
 """Backtest: NIFTY 50 spot candles (5-minute by default), buy ATM CE when
-price pulls back into the EMA(9)/EMA(20) cloud during an uptrend,
-consolidates tightly there, then breaks back out above the consolidation
-in the trend's direction. Buy ATM PE on the bearish mirror (downtrend,
-pullback into the cloud, breakout below) -- through real ATM NIFTY
-options, with a fixed rupee stop-loss/target.
+price pulls back into the EMA(9)/EMA(20) cloud during an uptrend, then
+breaks back out above the pullback's own high in the trend's
+direction. Buy ATM PE on the bearish mirror (downtrend, pullback into
+the cloud, breakout below) -- through real ATM NIFTY options, with a
+fixed rupee stop-loss/target.
 
 TREND: EMA(9) vs EMA(20) on the index's own closes. Uptrend when EMA9 >
 EMA20, downtrend when EMA9 < EMA20 -- the "cloud" is the band between
 the two EMA values at each bar (its color, in a chart, is which EMA is
 on top).
 
-PULLBACK + CONSOLIDATION: a bar "touches" the cloud when its own
-high/low range overlaps the EMA9-EMA20 band at that bar (low <=
-max(ema9,ema20) and high >= min(ema9,ema20)) -- price has pulled back
-into the band, not just approached it. CONSOLIDATION_MIN_BARS
-consecutive touching bars, whose combined high-low range is within
-CONSOLIDATION_ATR_MULT x ATR(14), count as a genuine basing zone (the
-circled area on a chart) rather than a single noisy wick through the
-band.
+PULLBACK + BREAKOUT, by each bar's CLOSE relative to the band (not its
+high/low range): during an uptrend, a bar whose close is below
+min(ema9,ema20) has genuinely pulled back below the cloud ("dipped").
+Once dipped, the trade fires on the first later bar (still in the same
+uptrend) whose close is back above max(ema9,ema20) -- "price came
+below the bands and broke above the band," the user's own chart
+reading, taken literally. The downtrend mirror is identical: a close
+above the band sets "dipped" (price popped above the cloud), and the
+first later close back below the band, still in the downtrend, fires
+a PE entry. Bars whose close sits inside the band, or on the trend
+side already (never dipped), don't affect the state.
 
-BREAKOUT CONFIRMATION: once a valid consolidation window exists, the
-trade fires the first later bar whose own close breaks back out of
-that window's own high (uptrend -> buy CE) or low (downtrend -> buy
-PE) AND is still on the same side of the trend as when the window
-formed (EMA9/EMA20 ordering unchanged) -- a literal trend-continuation
-entry, not a reversal. Entry fills at that breakout bar's own close.
+(An earlier version instead defined "touching" by high/low *range*
+overlap with the band and required several such bars within a tight
+ATR window before scanning for a breakout. That broke in two ways: a
+bar's low can graze the band on a wick even while the close -- and the
+rest of the trend -- is pushing to new highs well above it, so the
+"pullback" window silently extended across a genuine upswing and
+accumulated a high no later close could ever clear; and the
+ATR-tightness check only cleared the run state when it PASSED, so one
+failing bar left the window open to keep growing instead of resetting.
+Together these silently swallowed the 2026-10-06 12:15 breakout the
+user flagged by hand, despite the raw EMA9/EMA20/close data matching
+their description exactly. Keying off the close, with no range checks
+and no minimum-bar/ATR filter, fixes both and matches the chart.)
 
 candle_minutes (default 5, matching the screenshots this was modeled
 on): resamples each day's 1-minute index candles first. Every option
@@ -59,8 +69,6 @@ UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 EMA_FAST = 9
 EMA_SLOW = 20
 ATR_PERIOD = 14
-CONSOLIDATION_MIN_BARS = 3
-CONSOLIDATION_ATR_MULT = 2.0
 
 
 @dataclass
@@ -78,16 +86,6 @@ def _apply_slippage(price: float, side: str, slippage_pct: float) -> float:
     return price * (1 + slippage_pct) if side == "BUY" else price * (1 - slippage_pct)
 
 
-def _atr_at(bars: list[Bar], i: int, period: int = ATR_PERIOD) -> float | None:
-    if i < period:
-        return None
-    trs = []
-    for k in range(i - period + 1, i + 1):
-        prev_c = bars[k - 1].c
-        trs.append(max(bars[k].h - bars[k].l, abs(bars[k].h - prev_c), abs(bars[k].l - prev_c)))
-    return sum(trs) / period
-
-
 def run(
     from_date: str,
     to_date: str,
@@ -96,8 +94,6 @@ def run(
     candle_minutes: int = 5,
     ema_fast: int = EMA_FAST,
     ema_slow: int = EMA_SLOW,
-    consolidation_min_bars: int = CONSOLIDATION_MIN_BARS,
-    consolidation_atr_mult: float = CONSOLIDATION_ATR_MULT,
     sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
@@ -141,7 +137,7 @@ def run(
         return f"{dh:02d}:{dm:02d}"
 
     trades: list[OptionTrade] = []
-    min_bars = ATR_PERIOD + ema_slow + consolidation_min_bars + 3
+    min_bars = ATR_PERIOD + ema_slow + 3
 
     for day in trading_days:
         d = day["date"]
@@ -161,7 +157,8 @@ def run(
             continue
 
         i = ATR_PERIOD + ema_slow
-        touch_run_start: int | None = None  # start index of the current run of touching bars
+        dipped_up = False    # uptrend: a prior bar closed below the band
+        dipped_down = False  # downtrend: a prior bar closed above the band
         while i < len(bars):
             decision_time_str = _decision_time(bars[i].ts)
             if decision_time_str >= FORCE_FLAT_TIME:
@@ -174,46 +171,32 @@ def run(
             trend_up = f > s
             trend_down = f < s
             band_hi, band_lo = max(f, s), min(f, s)
-            touching = bars[i].l <= band_hi and bars[i].h >= band_lo
+            close = bars[i].c
 
-            if touching and (trend_up or trend_down):
-                if touch_run_start is None:
-                    touch_run_start = i
-            else:
-                touch_run_start = None
+            if not trend_up:
+                dipped_up = False
+            if not trend_down:
+                dipped_down = False
 
             direction_label = opt_type = None
-            if touch_run_start is not None and i - touch_run_start + 1 >= consolidation_min_bars:
-                window = bars[touch_run_start:i + 1]
-                win_hi = max(b.h for b in window)
-                win_lo = min(b.l for b in window)
-                atr = _atr_at(bars, i)
-                if atr is not None and atr > 0 and (win_hi - win_lo) <= atr * consolidation_atr_mult:
-                    # scan forward bars (not yet consumed) for the breakout
-                    for j in range(i + 1, len(bars)):
-                        j_decision_time = _decision_time(bars[j].ts)
-                        if j_decision_time >= FORCE_FLAT_TIME:
-                            break
-                        jf, js = ema9[j], ema20[j]
-                        if jf is None or js is None:
-                            continue
-                        still_up = jf > js
-                        still_down = jf < js
-                        if trend_up and still_up and bars[j].c > win_hi:
-                            direction_label, opt_type, breakout_idx = "LONG", "CE", j
-                            break
-                        if trend_down and still_down and bars[j].c < win_lo:
-                            direction_label, opt_type, breakout_idx = "SHORT", "PE", j
-                            break
-                        if (trend_up and not still_up) or (trend_down and not still_down):
-                            break  # trend itself flipped before any breakout -- window invalidated
-                    touch_run_start = None  # this window has been resolved (fired or invalidated) either way
+            if trend_up:
+                if dipped_up and close > band_hi:
+                    direction_label, opt_type = "LONG", "CE"
+                    dipped_up = False
+                elif close < band_lo:
+                    dipped_up = True
+            elif trend_down:
+                if dipped_down and close < band_lo:
+                    direction_label, opt_type = "SHORT", "PE"
+                    dipped_down = False
+                elif close > band_hi:
+                    dipped_down = True
 
             if direction_label is None:
                 i += 1
                 continue
 
-            entry_idx = breakout_idx
+            entry_idx = i
             entry_close = bars[entry_idx].c
             entry_ts = bars[entry_idx].ts
             entry_decision_time = _decision_time(entry_ts)
