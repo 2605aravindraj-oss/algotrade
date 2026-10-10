@@ -57,6 +57,12 @@ from backtest.fixed_volume_profile_options import _resolve_current_month_futures
 UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
 
+def _apply_slippage(price: float, side: str, slippage_pct: float) -> float:
+    if slippage_pct <= 0:
+        return price
+    return price * (1 + slippage_pct) if side == "BUY" else price * (1 - slippage_pct)
+
+
 def run(
     from_date: str,
     to_date: str,
@@ -69,6 +75,7 @@ def run(
     one_trade_per_day: bool = True,
     long_only: bool = False,
     short_only: bool = False,
+    slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
@@ -154,7 +161,7 @@ def run(
             nonlocal position
             _, candles = _atm_option_candles(position["strike"], position["opt_type"], position["date"], position["expiry"])
             bar = _fill(candles, decision_time_str) if candles else None
-            exit_price = bar[4] if bar else position["entry_price"]
+            exit_price = _apply_slippage(bar[4], "SELL", slippage_pct) if bar else position["entry_price"]
             exit_time = bar[0] if bar else ts
             trades.append(OptionTrade(
                 date=position["date"], direction=position["direction"], expiry=position["expiry"],
@@ -206,7 +213,8 @@ def run(
                     bar = _fill(candles, decision_time_str)
                     if bar is not None:
                         position = {
-                            "direction": direction_label, "entry_time": bar[0], "entry_price": bar[4],
+                            "direction": direction_label, "entry_time": bar[0],
+                            "entry_price": _apply_slippage(bar[4], "BUY", slippage_pct),
                             "strike": contract["strike_price"], "expiry": expiry,
                             "lot_size": contract["lot_size"], "opt_type": opt_type, "date": d,
                         }
