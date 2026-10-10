@@ -67,10 +67,21 @@ FORCE_FLAT_TIME (15:25). Only one position open at a time; order-block
 detection/tracking continues underneath it, but no new entry fires
 until flat.
 
-candle_minutes (default 5): resamples each day's 1-minute index
-candles first. Every option fill and the FORCE_FLAT_TIME cutoff go
-through a _decision_time() helper identical to
-macd_histogram_1min_dualstop_options.py's.
+candle_minutes (default 5): the STRUCTURE timeframe -- swings and
+order blocks are detected on bars this wide. entry_candle_minutes
+(default None, meaning "same as candle_minutes"): when set to a
+FINER value (e.g. candle_minutes=60, entry_candle_minutes=15), touch
+and confirmation are instead evaluated on that finer bar series --
+"mark order blocks on the 1-hour chart, enter on the 15-minute chart"
+multi-timeframe reading. An order block only becomes visible to the
+entry timeframe once its own structure-timeframe bar has actually
+CLOSED (its real-world decision timestamp, computed the same way as
+_decision_time but as a full datetime, not just a time-of-day
+string) -- never earlier, so a 15-minute bar can't react to a 1-hour
+zone before that hour has actually finished printing. Every option
+fill and the FORCE_FLAT_TIME cutoff go through a _decision_time()
+helper identical to macd_histogram_1min_dualstop_options.py's,
+evaluated at entry_candle_minutes granularity.
 
 STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
@@ -80,6 +91,7 @@ rolled over.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from data_sources import cache, upstox_client
 from backtest import options_common as oc
@@ -163,11 +175,14 @@ def run(
     underlying_key: str = UNDERLYING_KEY,
     strike_step: int = 50,
     candle_minutes: int = 5,
+    entry_candle_minutes: int | None = None,
     sl_rs: float = STOP_LOSS_RS,
     target_rs: float = TARGET_RS,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
+    entry_minutes = entry_candle_minutes if entry_candle_minutes is not None else candle_minutes
+
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -194,11 +209,18 @@ def run(
         return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
 
     def _decision_time(ts: str) -> str:
-        if candle_minutes <= 1:
+        if entry_minutes <= 1:
             return ts[11:16]
         hh, mm = int(ts[11:13]), int(ts[14:16])
-        dh, dm = divmod(hh * 60 + mm + candle_minutes, 60)
+        dh, dm = divmod(hh * 60 + mm + entry_minutes, 60)
         return f"{dh:02d}:{dm:02d}"
+
+    def _structure_close_dt(ts: str) -> datetime:
+        """The real-world instant a structure-timeframe bar's own close
+        becomes known -- its bucket start plus candle_minutes. An order
+        block built from that bar can't be visible to anything (same
+        timeframe or finer) before this instant."""
+        return datetime.fromisoformat(ts) + timedelta(minutes=candle_minutes)
 
     trades: list[OptionTrade] = []
     min_bars = 2 * PIVOT_WINDOW + 5
@@ -211,31 +233,50 @@ def run(
     if len(all_1min) < min_bars:
         return []
 
-    rows = _resample(all_1min, candle_minutes) if candle_minutes > 1 else all_1min
-    if len(rows) < min_bars:
+    structure_rows = _resample(all_1min, candle_minutes) if candle_minutes > 1 else all_1min
+    if len(structure_rows) < min_bars:
         return []
-    bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
+    structure_bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in structure_rows]
+
+    if entry_minutes == candle_minutes:
+        bars = structure_bars
+    else:
+        entry_rows = _resample(all_1min, entry_minutes) if entry_minutes > 1 else all_1min
+        bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in entry_rows]
 
     # Swing/order-block structure is detected ONCE, continuously across the
-    # whole date range -- not reset every morning. At coarse granularity
-    # (e.g. 60-minute bars) a single trading day doesn't hold enough bars
-    # to even confirm one pivot, let alone create and then touch/confirm an
-    # order block, so resetting daily made the pattern structurally
-    # undetectable above ~15-minute bars. Order blocks are a swing-
-    # structure concept anyway, not an intraday-reset one, so letting
-    # structure persist across days is the more faithful reading, not just
-    # a workaround. The OPTION POSITION itself still force-flattens at the
-    # end of its own entry day -- no overnight option holding -- via the
-    # day_end_idx bound on the exit scan below.
-    obs_by_created_idx = _find_order_blocks(bars)
+    # whole date range -- not reset every morning (see module docstring).
+    # Each order block's own creation timestamp -- when it becomes visible
+    # to the entry timeframe -- is its structure-timeframe bar's own close
+    # instant, not the bar's bucket-start label; this matters most in the
+    # multi-timeframe case (entry_minutes < candle_minutes), where many
+    # entry bars fall inside the window before that structure bar closes.
+    obs_by_created_idx = _find_order_blocks(structure_bars)
+    obs_available = sorted(
+        ((_structure_close_dt(structure_bars[idx].ts), ob) for idx, ob in obs_by_created_idx),
+        key=lambda x: x[0],
+    )
     active_obs: list[OrderBlock] = []
-    ob_cursor = 0  # next index into obs_by_created_idx to activate
+    ob_cursor = 0  # next index into obs_available to activate
 
     i = 0
     while i < len(bars):
         bar_date = bars[i].ts[:10]
+        bar_dt = datetime.fromisoformat(bars[i].ts)
         decision_time_str = _decision_time(bars[i].ts)
         skip_entries_today = decision_time_str >= FORCE_FLAT_TIME
+
+        # a newly available order block joins active_obs BEFORE this bar's
+        # own touch/confirm pass below -- so it's the structure bar's own
+        # close instant that gates visibility, not an extra bar of delay
+        # on top of that. For the single-timeframe case this reproduces
+        # exactly the earlier "earliest touch is the bar after creation"
+        # rule; for the multi-timeframe case it means the first entry-
+        # timeframe bar at or after the structure bar's close is already
+        # eligible to register a touch.
+        while ob_cursor < len(obs_available) and obs_available[ob_cursor][0] <= bar_dt:
+            active_obs.append(obs_available[ob_cursor][1])
+            ob_cursor += 1
 
         direction_label = opt_type = None
         still_active: list[OrderBlock] = []
@@ -265,18 +306,6 @@ def run(
                 # else: didn't confirm this bar -- discarded either way (not re-added)
 
         active_obs = still_active
-
-        # newly created order blocks join active_obs only AFTER this
-        # bar's touch/confirm processing above -- so the earliest a
-        # zone can register a "touch" is the bar AFTER it was created,
-        # never the breakout bar itself. That breakout bar's own low
-        # routinely wicks back into a zone that close to it just from
-        # noise, which was firing a touch+confirm (and so a trade) one
-        # bar later with no real pullback ever having happened -- not
-        # a retest, just confirmation-chasing an already-extended move.
-        while ob_cursor < len(obs_by_created_idx) and obs_by_created_idx[ob_cursor][0] == i:
-            active_obs.append(obs_by_created_idx[ob_cursor][1])
-            ob_cursor += 1
 
         if direction_label is None or skip_entries_today:
             i += 1
