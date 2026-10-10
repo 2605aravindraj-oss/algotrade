@@ -106,11 +106,40 @@ def run(
     ema_slow: int = EMA_SLOW,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
+    enable_trend_filter: bool = False,
+    trend_ema_period: int = 50,
+    enable_vol_filter: bool = False,
+    vol_fast_period: int = 10,
+    vol_slow_period: int = 30,
+    vol_filter_mult: float = 1.5,
 ) -> list[OptionTrade]:
+    """enable_trend_filter: only take a LONG when the PRIOR day's close is
+    at/above the daily EMA(trend_ema_period) (computed through the prior
+    day only -- no lookahead), and only a SHORT when at/below it. Meant
+    to block counter-trend bounce-trap entries during a strong broader
+    move (e.g. buying calls on an intraday "uptrend" crossover during a
+    larger multi-week downtrend, as happened in 2026-03).
+
+    enable_vol_filter: skip the whole day if the daily true-range EMA
+    (vol_fast_period) as of the PRIOR day has expanded to more than
+    vol_filter_mult x the slower one (vol_slow_period) -- a realized-
+    volatility shock filter, also using only data through the prior day.
+    """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
         return []
+
+    daily_closes = [dd["close"] for dd in trading_days]
+    daily_highs = [dd["high"] for dd in trading_days]
+    daily_lows = [dd["low"] for dd in trading_days]
+    trend_ema_series = _ema(daily_closes, trend_ema_period)
+    daily_tr = [daily_highs[0] - daily_lows[0]] + [
+        max(daily_highs[k] - daily_lows[k], abs(daily_highs[k] - daily_closes[k - 1]), abs(daily_lows[k] - daily_closes[k - 1]))
+        for k in range(1, len(trading_days))
+    ]
+    vol_fast_series = _ema(daily_tr, vol_fast_period)
+    vol_slow_series = _ema(daily_tr, vol_slow_period)
 
     expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
     chain_cache: dict[str, dict] = {}
@@ -147,8 +176,22 @@ def run(
     trades: list[OptionTrade] = []
     min_bars = ATR_PERIOD + ema_slow + 3
 
-    for day in trading_days:
+    for day_idx, day in enumerate(trading_days):
         d = day["date"]
+
+        allow_long, allow_short = True, True
+        if enable_trend_filter and day_idx >= 1:
+            trend_ema_prev = trend_ema_series[day_idx - 1]
+            close_prev = daily_closes[day_idx - 1]
+            if trend_ema_prev is not None:
+                allow_long = close_prev >= trend_ema_prev
+                allow_short = close_prev <= trend_ema_prev
+        if enable_vol_filter and day_idx >= 1:
+            vol_fast_prev = vol_fast_series[day_idx - 1]
+            vol_slow_prev = vol_slow_series[day_idx - 1]
+            if vol_fast_prev is not None and vol_slow_prev is not None and vol_fast_prev > vol_filter_mult * vol_slow_prev:
+                continue  # realized volatility shock -- sit out the whole day
+
         rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
         if len(rows_1min) < min_bars:
             continue
@@ -193,7 +236,8 @@ def run(
             direction_label = opt_type = None
             if trend_up:
                 if dipped_up and close > band_hi:
-                    direction_label, opt_type = "LONG", "CE"
+                    if allow_long:
+                        direction_label, opt_type = "LONG", "CE"
                     dipped_up = False
                     dip_low = None
                 elif close < band_lo:
@@ -201,7 +245,8 @@ def run(
                     dipped_up = True
             elif trend_down:
                 if dipped_down and close < band_lo:
-                    direction_label, opt_type = "SHORT", "PE"
+                    if allow_short:
+                        direction_label, opt_type = "SHORT", "PE"
                     dipped_down = False
                     dip_high = None
                 elif close > band_hi:
