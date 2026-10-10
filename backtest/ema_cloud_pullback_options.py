@@ -43,11 +43,17 @@ helper identical to macd_histogram_1min_dualstop_options.py's, since
 _resample labels a multi-minute bar by its bucket start, not its
 close -- the same look-ahead class already fixed there.
 
-EXIT: fixed rupee P&L stop-loss/target on the whole position (premium
-move x lot_size), same convention as every sl_rs/target_rs module in
-this codebase -- sl_rs (default 300) or target_rs (default 600),
-whichever hits first, else force-flat at FORCE_FLAT_TIME (15:25).
-Only one position open at a time.
+EXIT: a STRUCTURAL stop-loss, not a fixed rupee one -- the index's own
+low at the dip that triggered the setup (for a LONG: the lowest low
+reached while price was closed below the band, e.g. the 12:10 bar's
+low in the 2026-10-06 example) or high (for a SHORT, the mirror). The
+stop is hit the moment a later bar's index low trades back down
+through that level (LONG) or high trades back up through it (SHORT)
+-- the pullback's own structure invalidating itself, same idea as
+placing a stop just under the swing low on the chart. The target is
+still a fixed rupee move on the option premium (target_rs, default
+600) -- whichever of stop/target hits first, else force-flat at
+FORCE_FLAT_TIME (15:25). Only one position open at a time.
 
 STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
@@ -94,7 +100,6 @@ def run(
     candle_minutes: int = 5,
     ema_fast: int = EMA_FAST,
     ema_slow: int = EMA_SLOW,
-    sl_rs: float = 300.0,
     target_rs: float = 600.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
@@ -159,6 +164,8 @@ def run(
         i = ATR_PERIOD + ema_slow
         dipped_up = False    # uptrend: a prior bar closed below the band
         dipped_down = False  # downtrend: a prior bar closed above the band
+        dip_low: float | None = None   # lowest low reached while dipped_up
+        dip_high: float | None = None  # highest high reached while dipped_down
         while i < len(bars):
             decision_time_str = _decision_time(bars[i].ts)
             if decision_time_str >= FORCE_FLAT_TIME:
@@ -175,21 +182,27 @@ def run(
 
             if not trend_up:
                 dipped_up = False
+                dip_low = None
             if not trend_down:
                 dipped_down = False
+                dip_high = None
 
-            direction_label = opt_type = None
+            direction_label = opt_type = stop_level = None
             if trend_up:
                 if dipped_up and close > band_hi:
-                    direction_label, opt_type = "LONG", "CE"
+                    direction_label, opt_type, stop_level = "LONG", "CE", dip_low
                     dipped_up = False
+                    dip_low = None
                 elif close < band_lo:
+                    dip_low = bars[i].l if dip_low is None else min(dip_low, bars[i].l)
                     dipped_up = True
             elif trend_down:
                 if dipped_down and close < band_lo:
-                    direction_label, opt_type = "SHORT", "PE"
+                    direction_label, opt_type, stop_level = "SHORT", "PE", dip_high
                     dipped_down = False
+                    dip_high = None
                 elif close > band_hi:
+                    dip_high = bars[i].h if dip_high is None else max(dip_high, bars[i].h)
                     dipped_down = True
 
             if direction_label is None:
@@ -222,13 +235,20 @@ def run(
                     exit_idx = j
                     exit_reason = "eod"
                     break
-                bar_j = _fill(opt_rows, j_decision_time)
-                premium_j = bar_j[4] if bar_j else entry_price
-                pnl_per_lot = (premium_j - entry_price) * lot_size
-                if pnl_per_lot <= -sl_rs:
+                # structural stop: the index trading back through the
+                # dip's own low (LONG) / high (SHORT) that set up the
+                # entry invalidates the pullback, regardless of premium.
+                if direction_label == "LONG" and stop_level is not None and bars[j].l <= stop_level:
                     exit_idx = j
                     exit_reason = "stop_loss"
                     break
+                if direction_label == "SHORT" and stop_level is not None and bars[j].h >= stop_level:
+                    exit_idx = j
+                    exit_reason = "stop_loss"
+                    break
+                bar_j = _fill(opt_rows, j_decision_time)
+                premium_j = bar_j[4] if bar_j else entry_price
+                pnl_per_lot = (premium_j - entry_price) * lot_size
                 if pnl_per_lot >= target_rs:
                     exit_idx = j
                     exit_reason = "target"
