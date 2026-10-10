@@ -1,0 +1,366 @@
+"""Backtest: NIFTY 50 spot candles (1-minute by default, any
+candle_minutes), buy ATM PE on a BEARISH MACD histogram divergence, buy
+ATM CE on a BULLISH one -- through real ATM NIFTY options, with a fixed
+rupee stop-loss/target. This is the classic "two peaks/troughs of the
+histogram, same side of zero, no crossover in between" divergence read
+directly off a MACD panel, NOT a price-pivot double bottom/top (see
+macd_divergence_double_bottom_options.py for that, different and
+separate approach).
+
+candle_minutes>1 resamples first; every option fill and the
+FORCE_FLAT_TIME cutoff then go through a _decision_time() helper
+identical to macd_histogram_1min_dualstop_options.py's, since
+_resample labels a multi-minute bar by its bucket start, not its
+close -- the same look-ahead class already fixed there.
+
+HUMPS: the histogram is segmented into maximal runs of bars that stay
+on one side of zero ("humps") -- a positive hump ends the instant the
+histogram goes <=0, a negative hump ends the instant it goes >=0. Any
+comparison below only ever happens between two points INSIDE THE SAME
+HUMP -- a zero-line crossover immediately resets the hump's own
+tracking state, so a peak from one hump is never compared against a
+peak from the next. This is the "no crossover for finding divergence"
+requirement.
+
+LOCAL PEAK/TROUGH: bar k (inside a positive hump) is a local peak if
+its histogram value is the STRICT max over the peak_window bars on
+each side of it (2*peak_window+1 bars total); the negative-hump
+mirror (strict min) defines a local trough. peak_window=1 (default)
+is the literal single-bar/immediate-neighbor definition -- confirmed
+one bar after k. A larger peak_window filters out single-bar noise
+(at the cost of confirming peak_window bars later), closer to how a
+trendline drawn on a chart connects the visually obvious bar tops/
+bottoms rather than every tiny wiggle.
+
+BEARISH DIVERGENCE (buy ATM PE): within the same still-open positive
+hump, a newly confirmed local peak is LOWER than the previous local
+peak in that same hump (histogram momentum weakening) WHILE the
+index's own high at the new peak's bar is >= the index's high at the
+previous peak's bar (price making an equal/higher high) -- the
+textbook disagreement between price and momentum. Mirrored for:
+
+BULLISH DIVERGENCE (buy ATM CE): within the same negative hump, a
+newly confirmed local trough is HIGHER (less negative) than the
+previous trough WHILE the index's own low at the new trough's bar is
+<= the index's low at the previous trough's bar.
+
+ENTRY: fires immediately once a divergence is confirmed -- one bar
+after the weaker peak/trough itself (the earliest bar this can be
+known), filled at that bar's own close. Only one position open at a
+time; the hump-tracking state keeps updating every bar regardless of
+whether a position is open, so a divergence that forms WHILE a trade
+is running is still recorded (just not tradable until that position
+closes).
+
+MACD(12,26,9) is reseeded fresh every trading day (an SMA seed on
+that day's own candles), matching this codebase's established "revert
+back to daily calculation" convention.
+
+EXIT: fixed rupee P&L stop-loss/target on the whole position (premium
+move x lot_size) -- sl_rs (default 300) or target_rs (default 600),
+whichever hits first, else force-flat at FORCE_FLAT_TIME (15:25).
+
+STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
+expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
+an Upstox access token) for any day whose weekly contract has already
+rolled over.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from data_sources import cache, upstox_client
+from backtest import options_common as oc
+from backtest.futures_oi_buildup import FORCE_FLAT_TIME, _bar_at_or_after, _bar_at_or_before
+from backtest.macd_rsi2_momentum_options import OptionTrade
+from backtest.sweep_reclaim_breakout import _resample
+from backtest.technical_rating import _macd
+
+UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
+
+
+@dataclass
+class Bar:
+    ts: str
+    o: float
+    h: float
+    l: float
+    c: float
+
+
+def _apply_slippage(price: float, side: str, slippage_pct: float) -> float:
+    if slippage_pct <= 0:
+        return price
+    return price * (1 + slippage_pct) if side == "BUY" else price * (1 - slippage_pct)
+
+
+def run(
+    from_date: str,
+    to_date: str,
+    underlying_key: str = UNDERLYING_KEY,
+    strike_step: int = 50,
+    candle_minutes: int = 1,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
+    peak_window: int = 1,
+    require_confirmation_candle: bool = False,
+    require_neckline_breakout: bool = False,
+    confirmation_stale_bars: int = 10,
+    sl_rs: float = 300.0,
+    target_rs: float = 600.0,
+    slippage_pct: float = 0.0,
+    access_token: str | None = None,
+) -> list[OptionTrade]:
+    if require_confirmation_candle and require_neckline_breakout:
+        raise ValueError("require_confirmation_candle and require_neckline_breakout are mutually exclusive")
+    """candle_minutes (default 1): resamples each day's 1-minute index
+    candles to this bar size first -- e.g. candle_minutes=5 replays the
+    same hump/divergence logic a 5-minute version would use.
+
+    peak_window (default 1): a local peak/trough must be the STRICT
+    max/min over `peak_window` bars on each side (2*peak_window+1 bars
+    total), not just its two immediate neighbors -- filters out
+    single-bar noise at the cost of confirming peak_window bars later.
+    peak_window=1 is the literal single-bar definition (the original
+    behaviour).
+
+    require_confirmation_candle (default False): when True, a
+    confirmed divergence doesn't enter immediately -- it instead waits
+    for the first later bar whose own close clears the PREVIOUS bar's
+    close in the signal's direction (close > previous close for a
+    LONG, < for a SHORT), and enters there instead. This is a plain
+    price-action confirmation on top of the divergence itself (don't
+    buy into a reversal that hasn't actually started moving yet). The
+    pending signal expires (is dropped) if no such candle appears
+    within confirmation_stale_bars bars; a newer divergence of either
+    direction replaces whatever was still pending. False (default)
+    preserves the original "enter immediately on confirmation"
+    behaviour.
+
+    require_neckline_breakout (default False): the macd_divergence_
+    double_bottom_options.py style of confirmation instead -- the
+    "neckline" is the price extreme BETWEEN the two peaks/troughs
+    being compared (the lowest low in between for a bearish/SHORT
+    divergence, i.e. the pullback low between the two momentum
+    peaks; the highest high in between for a bullish/LONG divergence,
+    i.e. the bounce high between the two troughs). The trade only
+    fires once a later bar's close actually breaks that level (below
+    it for SHORT, above it for LONG), not merely on the next candle's
+    direction. Mutually exclusive with require_confirmation_candle;
+    same confirmation_stale_bars expiry and newer-divergence-replaces
+    -pending behaviour."""
+    trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
+    trading_days.sort(key=lambda d: d["date"])
+    if not trading_days:
+        return []
+
+    expiries = sorted(cache.get_expired_expiries_cached(underlying_key, "options", access_token))
+    chain_cache: dict[str, dict] = {}
+
+    def _atm_option_candles(strike, opt_type, date, expiry):
+        if expiry not in chain_cache:
+            chain_cache[expiry] = oc.build_chain_lookup(
+                cache.get_expired_option_chain_cached(underlying_key, expiry, access_token)
+            )
+        lookup = chain_cache[expiry]
+        contract = oc.nearest_contract(lookup, strike, opt_type)
+        if contract is None:
+            return None, None
+        candles = cache.get_day_candles_cached(
+            contract["instrument_key"], "1minute", date, expired=True, access_token=access_token
+        )
+        return contract, sorted(candles, key=lambda c: c[0])
+
+    def _fill(candles, at_time_str):
+        return _bar_at_or_after(candles, at_time_str) or _bar_at_or_before(candles, at_time_str)
+
+    def _decision_time(ts: str) -> str:
+        """_resample labels a multi-minute bar by its bucket START, not
+        its close -- see the identical helper (and its full rationale)
+        in macd_histogram_1min_dualstop_options.py. At candle_minutes<=1
+        no resampling happens, so this reduces to the bar's own
+        timestamp."""
+        if candle_minutes <= 1:
+            return ts[11:16]
+        hh, mm = int(ts[11:13]), int(ts[14:16])
+        dh, dm = divmod(hh * 60 + mm + candle_minutes, 60)
+        return f"{dh:02d}:{dm:02d}"
+
+    trades: list[OptionTrade] = []
+
+    for day in trading_days:
+        d = day["date"]
+        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
+        if len(rows_1min) < macd_slow + macd_signal + 5:
+            continue
+        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
+        if len(rows) < macd_slow + macd_signal + 5:
+            continue
+        bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
+        closes = [b.c for b in bars]
+        macd_line, signal_line = _macd(closes, macd_fast, macd_slow, macd_signal)
+        histogram = [(m - s) if (m is not None and s is not None) else None for m, s in zip(macd_line, signal_line)]
+
+        expiry = next((e for e in expiries if e >= d), None)
+        if expiry is None:
+            continue
+
+        position: dict | None = None
+        hump_sign = 0
+        hump_bars: list[tuple[int, float]] = []
+        last_peak: tuple[int, float, float] | None = None   # (idx, hist_value, price_high)
+        last_trough: tuple[int, float, float] | None = None  # (idx, hist_value, price_low)
+        pending_direction: str | None = None  # "LONG" or "SHORT", awaiting a confirmation candle
+        pending_since_idx: int | None = None
+        pending_neckline: float | None = None  # only used when require_neckline_breakout
+
+        def _open_position(i: int, direction_label: str) -> dict | None:
+            opt_type = "CE" if direction_label == "LONG" else "PE"
+            entry_close = bars[i].c
+            atm = oc.round_to_step(entry_close, strike_step)
+            contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
+            if contract is None or not opt_rows:
+                return None
+            entry_bar = _fill(opt_rows, _decision_time(bars[i].ts))
+            if entry_bar is None:
+                return None
+            return {
+                "direction": direction_label, "strike": contract["strike_price"],
+                "entry_time": bars[i].ts,
+                "entry_price": _apply_slippage(entry_bar[4], "BUY", slippage_pct),
+                "lot_size": contract["lot_size"], "opt_rows": opt_rows,
+            }
+
+        for i in range(len(bars)):
+            time_str = _decision_time(bars[i].ts)
+            if time_str >= FORCE_FLAT_TIME:
+                if position is not None:
+                    exit_bar = _fill(position["opt_rows"], time_str)
+                    exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else position["entry_price"]
+                    exit_time = exit_bar[0] if exit_bar else bars[i].ts
+                    trades.append(OptionTrade(
+                        date=d, direction=position["direction"], expiry=expiry, strike=position["strike"],
+                        entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                        exit_time=exit_time, exit_premium=exit_price, lot_size=position["lot_size"],
+                        exit_reason="eod",
+                    ))
+                    position = None
+                break
+
+            # -- exit check for an already-open position, using this bar's option price --
+            if position is not None:
+                bar_j = _fill(position["opt_rows"], time_str)
+                premium_j = bar_j[4] if bar_j else position["entry_price"]
+                pnl_per_lot = (premium_j - position["entry_price"]) * position["lot_size"]
+                exit_reason = None
+                if pnl_per_lot <= -sl_rs:
+                    exit_reason = "stop_loss"
+                elif pnl_per_lot >= target_rs:
+                    exit_reason = "target"
+                if exit_reason is not None:
+                    exit_price = _apply_slippage(premium_j, "SELL", slippage_pct)
+                    trades.append(OptionTrade(
+                        date=d, direction=position["direction"], expiry=expiry, strike=position["strike"],
+                        entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                        exit_time=bar_j[0] if bar_j else bars[i].ts, exit_premium=exit_price,
+                        lot_size=position["lot_size"], exit_reason=exit_reason,
+                    ))
+                    position = None
+
+            # -- confirmation-candle check for a pending signal (only when enabled) --
+            if require_confirmation_candle and pending_direction is not None and position is None:
+                if i - pending_since_idx > confirmation_stale_bars:
+                    pending_direction = None
+                    pending_since_idx = None
+                elif i >= 1:
+                    confirmed = (
+                        (pending_direction == "LONG" and bars[i].c > bars[i - 1].c)
+                        or (pending_direction == "SHORT" and bars[i].c < bars[i - 1].c)
+                    )
+                    if confirmed:
+                        position = _open_position(i, pending_direction)
+                        pending_direction = None
+                        pending_since_idx = None
+
+            # -- neckline-breakout check for a pending signal (only when enabled) --
+            if require_neckline_breakout and pending_direction is not None and position is None:
+                if i - pending_since_idx > confirmation_stale_bars:
+                    pending_direction = None
+                    pending_since_idx = None
+                    pending_neckline = None
+                else:
+                    broken = (
+                        (pending_direction == "LONG" and bars[i].c > pending_neckline)
+                        or (pending_direction == "SHORT" and bars[i].c < pending_neckline)
+                    )
+                    if broken:
+                        position = _open_position(i, pending_direction)
+                        pending_direction = None
+                        pending_since_idx = None
+                        pending_neckline = None
+
+            # -- hump/divergence tracking, every bar, regardless of position state --
+            h = histogram[i]
+            if h is not None and h != 0:
+                sign = 1 if h > 0 else -1
+                if sign != hump_sign:
+                    hump_sign = sign
+                    hump_bars = []
+                    last_peak = None
+                    last_trough = None
+                hump_bars.append((i, h))
+
+                window_len = 2 * peak_window + 1
+                if len(hump_bars) >= window_len:
+                    window_slice = hump_bars[-window_len:]
+                    idx_mid, val_mid = window_slice[peak_window]
+                    values = [v for _, v in window_slice]
+
+                    if hump_sign == 1 and val_mid == max(values) and values.count(val_mid) == 1:
+                        price_high_mid = bars[idx_mid].h
+                        if last_peak is not None:
+                            idx_prev, prev_val, prev_price_high = last_peak
+                            if val_mid < prev_val and price_high_mid >= prev_price_high and position is None:
+                                if require_neckline_breakout:
+                                    pending_direction, pending_since_idx = "SHORT", i
+                                    pending_neckline = min(b.l for b in bars[idx_prev:idx_mid + 1])
+                                elif require_confirmation_candle:
+                                    pending_direction, pending_since_idx = "SHORT", i
+                                else:
+                                    position = _open_position(i, "SHORT")
+                        last_peak = (idx_mid, val_mid, price_high_mid)
+
+                    elif hump_sign == -1 and val_mid == min(values) and values.count(val_mid) == 1:
+                        price_low_mid = bars[idx_mid].l
+                        if last_trough is not None:
+                            idx_prev, prev_val, prev_price_low = last_trough
+                            if val_mid > prev_val and price_low_mid <= prev_price_low and position is None:
+                                if require_neckline_breakout:
+                                    pending_direction, pending_since_idx = "LONG", i
+                                    pending_neckline = max(b.h for b in bars[idx_prev:idx_mid + 1])
+                                elif require_confirmation_candle:
+                                    pending_direction, pending_since_idx = "LONG", i
+                                else:
+                                    position = _open_position(i, "LONG")
+                        last_trough = (idx_mid, val_mid, price_low_mid)
+
+        # any position still open at the very end of the day's bars (shouldn't
+        # normally happen since FORCE_FLAT_TIME closes it first, but guard anyway)
+        if position is not None:
+            opt_rows = position["opt_rows"]
+            last_premium = opt_rows[-1][4]
+            exit_price = _apply_slippage(last_premium, "SELL", slippage_pct)
+            trades.append(OptionTrade(
+                date=d, direction=position["direction"], expiry=expiry, strike=position["strike"],
+                entry_time=position["entry_time"], entry_premium=position["entry_price"],
+                exit_time=opt_rows[-1][0], exit_premium=exit_price, lot_size=position["lot_size"],
+                exit_reason="eod",
+            ))
+
+    return trades
+
+
+def summary(trades: list[OptionTrade]) -> str:
+    from backtest.macd_rsi2_momentum_options import summary as _summary
+    return _summary(trades)
