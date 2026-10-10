@@ -23,16 +23,30 @@ swing level consumes it -- a new order block in the same direction
 needs a fresh confirmed swing first.
 
 ENTRY (touch + reversal candle, not a bare touch): once an order
-block's zone exists, wait for a later bar to trade into it (its own
-high/low range overlapping the zone). If that same touching bar's
-close already broke all the way through the far side of the zone
-(fully invalidating it rather than reacting off it), the order block
-is discarded right there. Otherwise the NEXT bar is the confirmation:
-if its close reclaims back out the impulse side of the zone (above
+block's zone exists, wait for a LATER bar (never the breakout bar
+itself -- see below) to trade into it (its own high/low range
+overlapping the zone). If that same touching bar's close already
+broke all the way through the far side of the zone (fully
+invalidating it rather than reacting off it), the order block is
+discarded right there. Otherwise the NEXT bar is the confirmation: if
+its close reclaims back out the impulse side of the zone (above
 zone_high for a bullish OB, below zone_low for a bearish one), the
 trade fires at that close; if instead it closes through the far side,
 the order block is discarded unconfirmed. Each order block can only
 ever produce one trade (or none).
+
+The breakout bar itself is deliberately excluded from touching its own
+just-created zone, even though the zone is built from the candle right
+before it: a zone that close to current price gets its low/high
+grazed by ordinary wick noise on the very next bar almost every time,
+which (in an earlier version of this module) registered as an
+immediate "touch" at creation and fired the confirmation one bar
+later with no real pullback ever having happened -- confirmation-
+chasing an already-extended move, not a genuine retest. Manually
+tracing three of that version's trades against the raw index bars
+confirmed this was happening on all three. Requiring the touch to
+land on a bar strictly after creation forces an actual gap/pullback
+to occur first.
 
 EXIT: fixed rupee P&L stop-loss/target on the option premium (x
 lot_size), same convention as ema_cloud_pullback_options.py and every
@@ -202,10 +216,6 @@ def run(
             if decision_time_str >= FORCE_FLAT_TIME:
                 break
 
-            while ob_cursor < len(obs_by_created_idx) and obs_by_created_idx[ob_cursor][0] == i:
-                active_obs.append(obs_by_created_idx[ob_cursor][1])
-                ob_cursor += 1
-
             direction_label = opt_type = None
             still_active: list[OrderBlock] = []
             for ob in active_obs:
@@ -234,6 +244,18 @@ def run(
                     # else: didn't confirm this bar -- discarded either way (not re-added)
 
             active_obs = still_active
+
+            # newly created order blocks join active_obs only AFTER this
+            # bar's touch/confirm processing above -- so the earliest a
+            # zone can register a "touch" is the bar AFTER it was created,
+            # never the breakout bar itself. That breakout bar's own low
+            # routinely wicks back into a zone that close to it just from
+            # noise, which was firing a touch+confirm (and so a trade) one
+            # bar later with no real pullback ever having happened -- not
+            # a retest, just confirmation-chasing an already-extended move.
+            while ob_cursor < len(obs_by_created_idx) and obs_by_created_idx[ob_cursor][0] == i:
+                active_obs.append(obs_by_created_idx[ob_cursor][1])
+                ob_cursor += 1
 
             if direction_label is None:
                 i += 1
