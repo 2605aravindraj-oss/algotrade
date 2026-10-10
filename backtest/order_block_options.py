@@ -6,7 +6,18 @@ SWING STRUCTURE: a bar p is a confirmed swing high once PIVOT_WINDOW
 bars have passed on both sides and its high is the strict max over
 that 2*PIVOT_WINDOW+1-bar window (confirmed PIVOT_WINDOW bars later,
 so no lookahead -- same discipline as every other pivot-based module
-in this codebase). Swing lows are the mirror (strict min).
+in this codebase). Swing lows are the mirror (strict min). Structure
+is detected ONCE, continuously, across the whole backtest date range
+-- NOT reset every morning. At 5-minute bars a trading day has plenty
+of room for this to not matter much, but at coarser granularity (an
+hour or more) a single day doesn't hold enough bars to even confirm
+one pivot, so a daily reset made the pattern undetectable above
+roughly 15-minute bars; letting structure persist is also the more
+faithful reading of what an order block actually is (a swing-level
+concept, not an intraday-reset one). The OPTION POSITION itself still
+force-flattens at the end of its own entry day -- no overnight
+option holding -- only the underlying swing/order-block TRACKING
+spans days.
 
 ORDER BLOCK: when a later bar's CLOSE breaks above the most recent
 still-unbroken confirmed swing high (a bullish break of structure),
@@ -192,129 +203,149 @@ def run(
     trades: list[OptionTrade] = []
     min_bars = 2 * PIVOT_WINDOW + 5
 
+    all_1min: list[list] = []
     for day in trading_days:
-        d = day["date"]
-        rows_1min = sorted(cache.get_day_candles_cached(underlying_key, "1minute", d, expired=False), key=lambda r: r[0])
-        if len(rows_1min) < min_bars:
-            continue
-        rows = _resample(rows_1min, candle_minutes) if candle_minutes > 1 else rows_1min
-        if len(rows) < min_bars:
-            continue
-        bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
+        rows = sorted(cache.get_day_candles_cached(underlying_key, "1minute", day["date"], expired=False), key=lambda r: r[0])
+        all_1min.extend(rows)
+    all_1min.sort(key=lambda r: r[0])
+    if len(all_1min) < min_bars:
+        return []
 
+    rows = _resample(all_1min, candle_minutes) if candle_minutes > 1 else all_1min
+    if len(rows) < min_bars:
+        return []
+    bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in rows]
+
+    # Swing/order-block structure is detected ONCE, continuously across the
+    # whole date range -- not reset every morning. At coarse granularity
+    # (e.g. 60-minute bars) a single trading day doesn't hold enough bars
+    # to even confirm one pivot, let alone create and then touch/confirm an
+    # order block, so resetting daily made the pattern structurally
+    # undetectable above ~15-minute bars. Order blocks are a swing-
+    # structure concept anyway, not an intraday-reset one, so letting
+    # structure persist across days is the more faithful reading, not just
+    # a workaround. The OPTION POSITION itself still force-flattens at the
+    # end of its own entry day -- no overnight option holding -- via the
+    # day_end_idx bound on the exit scan below.
+    obs_by_created_idx = _find_order_blocks(bars)
+    active_obs: list[OrderBlock] = []
+    ob_cursor = 0  # next index into obs_by_created_idx to activate
+
+    i = 0
+    while i < len(bars):
+        bar_date = bars[i].ts[:10]
+        decision_time_str = _decision_time(bars[i].ts)
+        skip_entries_today = decision_time_str >= FORCE_FLAT_TIME
+
+        direction_label = opt_type = None
+        still_active: list[OrderBlock] = []
+        for ob in active_obs:
+            if direction_label is not None:
+                still_active.append(ob)  # a trade already fired this bar; leave the rest untouched
+                continue
+
+            touching = bars[i].l <= ob.zone_high and bars[i].h >= ob.zone_low
+            close = bars[i].c
+
+            if ob.state == "pending_touch":
+                if touching:
+                    if ob.direction == "LONG" and close < ob.zone_low:
+                        continue  # closed straight through -- invalidated
+                    if ob.direction == "SHORT" and close > ob.zone_high:
+                        continue  # closed straight through -- invalidated
+                    ob.state = "touched"
+                    still_active.append(ob)
+                else:
+                    still_active.append(ob)
+            elif ob.state == "touched":
+                if ob.direction == "LONG" and close > ob.zone_high:
+                    direction_label, opt_type = "LONG", "CE"
+                elif ob.direction == "SHORT" and close < ob.zone_low:
+                    direction_label, opt_type = "SHORT", "PE"
+                # else: didn't confirm this bar -- discarded either way (not re-added)
+
+        active_obs = still_active
+
+        # newly created order blocks join active_obs only AFTER this
+        # bar's touch/confirm processing above -- so the earliest a
+        # zone can register a "touch" is the bar AFTER it was created,
+        # never the breakout bar itself. That breakout bar's own low
+        # routinely wicks back into a zone that close to it just from
+        # noise, which was firing a touch+confirm (and so a trade) one
+        # bar later with no real pullback ever having happened -- not
+        # a retest, just confirmation-chasing an already-extended move.
+        while ob_cursor < len(obs_by_created_idx) and obs_by_created_idx[ob_cursor][0] == i:
+            active_obs.append(obs_by_created_idx[ob_cursor][1])
+            ob_cursor += 1
+
+        if direction_label is None or skip_entries_today:
+            i += 1
+            continue
+
+        d = bar_date
         expiry = next((e for e in expiries if e >= d), None)
         if expiry is None:
+            i += 1
             continue
 
-        obs_by_created_idx = _find_order_blocks(bars)
-        active_obs: list[OrderBlock] = []
-        ob_cursor = 0  # next index into obs_by_created_idx to activate
+        entry_idx = i
+        entry_close = bars[entry_idx].c
+        entry_ts = bars[entry_idx].ts
+        entry_decision_time = decision_time_str
+        atm = oc.round_to_step(entry_close, strike_step)
 
-        i = 0
-        while i < len(bars):
-            decision_time_str = _decision_time(bars[i].ts)
-            if decision_time_str >= FORCE_FLAT_TIME:
+        contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
+        if contract is None or not opt_rows:
+            i = entry_idx + 1
+            continue
+
+        entry_bar = _fill(opt_rows, entry_decision_time)
+        if entry_bar is None:
+            i = entry_idx + 1
+            continue
+        entry_price = _apply_slippage(entry_bar[4], "BUY", slippage_pct)
+        lot_size = contract["lot_size"]
+
+        day_end_idx = entry_idx
+        while day_end_idx + 1 < len(bars) and bars[day_end_idx + 1].ts[:10] == d:
+            day_end_idx += 1
+
+        exit_idx = None
+        exit_reason = None
+        for j in range(entry_idx + 1, day_end_idx + 1):
+            j_decision_time = _decision_time(bars[j].ts)
+            if j_decision_time >= FORCE_FLAT_TIME:
+                exit_idx = j
+                exit_reason = "eod"
+                break
+            bar_j = _fill(opt_rows, j_decision_time)
+            premium_j = bar_j[4] if bar_j else entry_price
+            pnl_per_lot = (premium_j - entry_price) * lot_size
+            if pnl_per_lot <= -sl_rs:
+                exit_idx = j
+                exit_reason = "stop_loss"
+                break
+            if pnl_per_lot >= target_rs:
+                exit_idx = j
+                exit_reason = "target"
                 break
 
-            direction_label = opt_type = None
-            still_active: list[OrderBlock] = []
-            for ob in active_obs:
-                if direction_label is not None:
-                    still_active.append(ob)  # a trade already fired this bar; leave the rest untouched
-                    continue
+        if exit_idx is None:
+            exit_idx = day_end_idx
+            exit_reason = "eod"
 
-                touching = bars[i].l <= ob.zone_high and bars[i].h >= ob.zone_low
-                close = bars[i].c
+        exit_decision_time = _decision_time(bars[exit_idx].ts)
+        exit_bar = _fill(opt_rows, exit_decision_time)
+        exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
+        exit_time = exit_bar[0] if exit_bar else bars[exit_idx].ts
 
-                if ob.state == "pending_touch":
-                    if touching:
-                        if ob.direction == "LONG" and close < ob.zone_low:
-                            continue  # closed straight through -- invalidated
-                        if ob.direction == "SHORT" and close > ob.zone_high:
-                            continue  # closed straight through -- invalidated
-                        ob.state = "touched"
-                        still_active.append(ob)
-                    else:
-                        still_active.append(ob)
-                elif ob.state == "touched":
-                    if ob.direction == "LONG" and close > ob.zone_high:
-                        direction_label, opt_type = "LONG", "CE"
-                    elif ob.direction == "SHORT" and close < ob.zone_low:
-                        direction_label, opt_type = "SHORT", "PE"
-                    # else: didn't confirm this bar -- discarded either way (not re-added)
+        trades.append(OptionTrade(
+            date=d, direction=direction_label, expiry=expiry, strike=contract["strike_price"],
+            entry_time=entry_ts, entry_premium=entry_price, exit_time=exit_time, exit_premium=exit_price,
+            lot_size=lot_size, exit_reason=exit_reason,
+        ))
 
-            active_obs = still_active
-
-            # newly created order blocks join active_obs only AFTER this
-            # bar's touch/confirm processing above -- so the earliest a
-            # zone can register a "touch" is the bar AFTER it was created,
-            # never the breakout bar itself. That breakout bar's own low
-            # routinely wicks back into a zone that close to it just from
-            # noise, which was firing a touch+confirm (and so a trade) one
-            # bar later with no real pullback ever having happened -- not
-            # a retest, just confirmation-chasing an already-extended move.
-            while ob_cursor < len(obs_by_created_idx) and obs_by_created_idx[ob_cursor][0] == i:
-                active_obs.append(obs_by_created_idx[ob_cursor][1])
-                ob_cursor += 1
-
-            if direction_label is None:
-                i += 1
-                continue
-
-            entry_idx = i
-            entry_close = bars[entry_idx].c
-            entry_ts = bars[entry_idx].ts
-            entry_decision_time = _decision_time(entry_ts)
-            atm = oc.round_to_step(entry_close, strike_step)
-
-            contract, opt_rows = _atm_option_candles(atm, opt_type, d, expiry)
-            if contract is None or not opt_rows:
-                i = entry_idx + 1
-                continue
-
-            entry_bar = _fill(opt_rows, entry_decision_time)
-            if entry_bar is None:
-                i = entry_idx + 1
-                continue
-            entry_price = _apply_slippage(entry_bar[4], "BUY", slippage_pct)
-            lot_size = contract["lot_size"]
-
-            exit_idx = None
-            exit_reason = None
-            for j in range(entry_idx + 1, len(bars)):
-                j_decision_time = _decision_time(bars[j].ts)
-                if j_decision_time >= FORCE_FLAT_TIME:
-                    exit_idx = j
-                    exit_reason = "eod"
-                    break
-                bar_j = _fill(opt_rows, j_decision_time)
-                premium_j = bar_j[4] if bar_j else entry_price
-                pnl_per_lot = (premium_j - entry_price) * lot_size
-                if pnl_per_lot <= -sl_rs:
-                    exit_idx = j
-                    exit_reason = "stop_loss"
-                    break
-                if pnl_per_lot >= target_rs:
-                    exit_idx = j
-                    exit_reason = "target"
-                    break
-
-            if exit_idx is None:
-                exit_idx = len(bars) - 1
-                exit_reason = "eod"
-
-            exit_decision_time = _decision_time(bars[exit_idx].ts)
-            exit_bar = _fill(opt_rows, exit_decision_time)
-            exit_price = _apply_slippage(exit_bar[4], "SELL", slippage_pct) if exit_bar else entry_price
-            exit_time = exit_bar[0] if exit_bar else bars[exit_idx].ts
-
-            trades.append(OptionTrade(
-                date=d, direction=direction_label, expiry=expiry, strike=contract["strike_price"],
-                entry_time=entry_ts, entry_premium=entry_price, exit_time=exit_time, exit_premium=exit_price,
-                lot_size=lot_size, exit_reason=exit_reason,
-            ))
-
-            i = exit_idx + 1
+        i = exit_idx + 1
 
     return trades
 
