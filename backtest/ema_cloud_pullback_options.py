@@ -55,12 +55,19 @@ still gets cut quickly but a winner isn't capped:
      also moves to the option's own entry price, so from here the
      worst case is flat, not a loss.
   3. TRAILING -- once premium profit reaches TARGET_RS (default 600):
-     the premium floor is dropped and the exit switches fully to the
-     structural index stop, which is now ratcheted every time a later
-     bar repeats the SAME dip-and-reclaim pattern that triggered the
-     entry (a fresh, higher pullback low for a LONG, ratcheted up,
-     never loosened) -- riding the trend instead of capping the winner
-     at a fixed rupee move.
+     the exit switches to the structural index stop, now ratcheted
+     every time a later bar repeats the SAME dip-and-reclaim pattern
+     that triggered the entry (a fresh, higher pullback low for a
+     LONG, ratcheted up, never loosened) -- riding the trend instead
+     of capping the winner at a fixed rupee move. ALONGSIDE that, the
+     premium's own peak P&L since trailing began is tracked, and the
+     trade also exits if profit retraces more than PREMIUM_TRAIL_PCT
+     (default 40%) from that peak, floored at TARGET_RS -- because the
+     index's own swing structure is coarser than the option's price
+     action, and a fast premium spike can fully round-trip before the
+     structural stop ever catches it (as happened on 2026-10-06's
+     12:15 LONG: +1,111 unrealized by 12:45, then a loss by 14:30,
+     with the index trend technically still intact throughout).
 
 Force-flat at FORCE_FLAT_TIME (15:25) regardless of stage. Only one
 position open at a time.
@@ -85,8 +92,9 @@ UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 EMA_FAST = 9
 EMA_SLOW = 20
 ATR_PERIOD = 14
-BREAKEVEN_RS = 300.0  # premium profit (Rs/lot) at which the stop moves to breakeven
-TARGET_RS = 600.0     # premium profit (Rs/lot) at which the stop switches to structural trailing
+BREAKEVEN_RS = 300.0      # premium profit (Rs/lot) at which the stop moves to breakeven
+TARGET_RS = 600.0         # premium profit (Rs/lot) at which the stop switches to structural trailing
+PREMIUM_TRAIL_PCT = 0.4   # once trailing, exit if profit retraces this fraction from its peak
 
 
 @dataclass
@@ -254,6 +262,7 @@ def run(
             trail_stop = stop_level
             trail_dipped = False   # a later bar, mid-trade, has re-dipped past the band
             trail_dip_extreme: float | None = None  # its own low (LONG) / high (SHORT)
+            peak_pnl: float | None = None  # best premium P&L seen since entering "trailing"
             for j in range(entry_idx + 1, len(bars)):
                 j_decision_time = _decision_time(bars[j].ts)
                 if j_decision_time >= FORCE_FLAT_TIME:
@@ -284,6 +293,7 @@ def run(
                     stage = "breakeven"
                 if stage == "breakeven" and pnl_per_lot >= TARGET_RS:
                     stage = "trailing"
+                    peak_pnl = pnl_per_lot
 
                 if direction_label == "LONG" and trail_stop is not None and bars[j].l <= trail_stop:
                     exit_idx = j
@@ -299,6 +309,19 @@ def run(
                     break
 
                 if stage == "trailing":
+                    # the structural stop alone can lag a fast premium
+                    # move (the index's own swing structure is coarser
+                    # than the option's own price action), so also trail
+                    # the premium's own peak P&L: give back no more than
+                    # PREMIUM_TRAIL_PCT of the best profit seen since
+                    # trailing began, floored at TARGET_RS so this can
+                    # never cut in below where trailing itself started.
+                    peak_pnl = pnl_per_lot if peak_pnl is None else max(peak_pnl, pnl_per_lot)
+                    premium_floor = max(TARGET_RS, peak_pnl * (1 - PREMIUM_TRAIL_PCT))
+                    if pnl_per_lot <= premium_floor:
+                        exit_idx = j
+                        exit_reason = "premium_trail"
+                        break
                     # same dip-and-reclaim pattern as the entry trigger,
                     # continued through the trade: each completed cycle
                     # ratchets the structural stop up (LONG) / down (SHORT)
