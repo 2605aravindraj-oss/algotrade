@@ -108,22 +108,31 @@ def run(
     access_token: str | None = None,
     enable_trend_filter: bool = False,
     trend_ema_period: int = 50,
-    enable_vol_filter: bool = False,
+    enable_vol_filter: bool = True,
     vol_fast_period: int = 10,
     vol_slow_period: int = 30,
-    vol_filter_mult: float = 1.5,
+    vol_filter_mult: float = 1.1,
 ) -> list[OptionTrade]:
     """enable_trend_filter: only take a LONG when the PRIOR day's close is
     at/above the daily EMA(trend_ema_period) (computed through the prior
     day only -- no lookahead), and only a SHORT when at/below it. Meant
     to block counter-trend bounce-trap entries during a strong broader
     move (e.g. buying calls on an intraday "uptrend" crossover during a
-    larger multi-week downtrend, as happened in 2026-03).
+    larger multi-week downtrend, as happened in 2026-03). Tested worse
+    overall on the 2024-10..2026-09 quarterly breakdown (+27,728.95 net
+    vs. +33,157.95 with it off) -- it fixed 2026 Q1 a little but cost
+    more elsewhere -- so this one defaults OFF.
 
     enable_vol_filter: skip the whole day if the daily true-range EMA
     (vol_fast_period) as of the PRIOR day has expanded to more than
     vol_filter_mult x the slower one (vol_slow_period) -- a realized-
     volatility shock filter, also using only data through the prior day.
+    Defaults ON at vol_filter_mult=1.1: this one tested better on the
+    same breakdown (+41,605.70 net, a stable plateau across mult 1.08-
+    1.12, holding its edge over the unfiltered version under 0.05-0.2%
+    slippage too) -- it fixed both weak quarters (2025 Q3: -3.75 ->
+    +465.00; 2026 Q1: +176.80 -> +8,792.55) while leaving every strong
+    quarter essentially untouched.
     """
     trading_days = upstox_client.get_daily_history(underlying_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
