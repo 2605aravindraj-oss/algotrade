@@ -43,17 +43,27 @@ helper identical to macd_histogram_1min_dualstop_options.py's, since
 _resample labels a multi-minute bar by its bucket start, not its
 close -- the same look-ahead class already fixed there.
 
-EXIT: a STRUCTURAL stop-loss, not a fixed rupee one -- the index's own
-low at the dip that triggered the setup (for a LONG: the lowest low
-reached while price was closed below the band, e.g. the 12:10 bar's
-low in the 2026-10-06 example) or high (for a SHORT, the mirror). The
-stop is hit the moment a later bar's index low trades back down
-through that level (LONG) or high trades back up through it (SHORT)
--- the pullback's own structure invalidating itself, same idea as
-placing a stop just under the swing low on the chart. The target is
-still a fixed rupee move on the option premium (target_rs, default
-600) -- whichever of stop/target hits first, else force-flat at
-FORCE_FLAT_TIME (15:25). Only one position open at a time.
+EXIT: three stages on the option's own premium P&L, so an early loser
+still gets cut quickly but a winner isn't capped:
+
+  1. INITIAL -- below BREAKEVEN_RS (default 300) profit: the only exits
+     are the structural dip-stop (the index's own low at the dip that
+     triggered the setup, e.g. the 12:10 bar's low for the 2026-10-06
+     12:15 LONG) and a trend flip (EMA9/EMA20 cross against the
+     position -- the cloud changing color).
+  2. BREAKEVEN -- once premium profit reaches BREAKEVEN_RS: the stop
+     also moves to the option's own entry price, so from here the
+     worst case is flat, not a loss.
+  3. TRAILING -- once premium profit reaches TARGET_RS (default 600):
+     the premium floor is dropped and the exit switches fully to the
+     structural index stop, which is now ratcheted every time a later
+     bar repeats the SAME dip-and-reclaim pattern that triggered the
+     entry (a fresh, higher pullback low for a LONG, ratcheted up,
+     never loosened) -- riding the trend instead of capping the winner
+     at a fixed rupee move.
+
+Force-flat at FORCE_FLAT_TIME (15:25) regardless of stage. Only one
+position open at a time.
 
 STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
@@ -75,6 +85,8 @@ UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 EMA_FAST = 9
 EMA_SLOW = 20
 ATR_PERIOD = 14
+BREAKEVEN_RS = 300.0  # premium profit (Rs/lot) at which the stop moves to breakeven
+TARGET_RS = 600.0     # premium profit (Rs/lot) at which the stop switches to structural trailing
 
 
 @dataclass
@@ -100,7 +112,6 @@ def run(
     candle_minutes: int = 5,
     ema_fast: int = EMA_FAST,
     ema_slow: int = EMA_SLOW,
-    target_rs: float = 600.0,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -229,30 +240,87 @@ def run(
 
             exit_idx = None
             exit_reason = None
+            # three stages on the option's own premium P&L:
+            #   "initial"   -- below BREAKEVEN_RS profit: only the structural
+            #                  dip stop and a trend flip can exit.
+            #   "breakeven" -- >= BREAKEVEN_RS: stop also moves to the
+            #                  option's own entry price (give back to flat,
+            #                  not a loss).
+            #   "trailing"  -- >= TARGET_RS: stop lets go of the premium
+            #                  floor and switches fully to the structural
+            #                  index trail (ratcheted by each dip-and-reclaim
+            #                  cycle), riding the trend instead of capping it.
+            stage = "initial"
+            trail_stop = stop_level
+            trail_dipped = False   # a later bar, mid-trade, has re-dipped past the band
+            trail_dip_extreme: float | None = None  # its own low (LONG) / high (SHORT)
             for j in range(entry_idx + 1, len(bars)):
                 j_decision_time = _decision_time(bars[j].ts)
                 if j_decision_time >= FORCE_FLAT_TIME:
                     exit_idx = j
                     exit_reason = "eod"
                     break
-                # structural stop: the index trading back through the
-                # dip's own low (LONG) / high (SHORT) that set up the
-                # entry invalidates the pullback, regardless of premium.
-                if direction_label == "LONG" and stop_level is not None and bars[j].l <= stop_level:
+
+                jf, js = ema9[j], ema20[j]
+                if jf is None or js is None:
+                    continue
+                j_band_hi, j_band_lo = max(jf, js), min(jf, js)
+                j_close = bars[j].c
+
+                if direction_label == "LONG" and not (jf > js):
                     exit_idx = j
-                    exit_reason = "stop_loss"
+                    exit_reason = "trend_flip"
                     break
-                if direction_label == "SHORT" and stop_level is not None and bars[j].h >= stop_level:
+                if direction_label == "SHORT" and not (jf < js):
                     exit_idx = j
-                    exit_reason = "stop_loss"
+                    exit_reason = "trend_flip"
                     break
+
                 bar_j = _fill(opt_rows, j_decision_time)
                 premium_j = bar_j[4] if bar_j else entry_price
                 pnl_per_lot = (premium_j - entry_price) * lot_size
-                if pnl_per_lot >= target_rs:
+
+                if stage == "initial" and pnl_per_lot >= BREAKEVEN_RS:
+                    stage = "breakeven"
+                if stage == "breakeven" and pnl_per_lot >= TARGET_RS:
+                    stage = "trailing"
+
+                if direction_label == "LONG" and trail_stop is not None and bars[j].l <= trail_stop:
                     exit_idx = j
-                    exit_reason = "target"
+                    exit_reason = "stop_loss"
                     break
+                if direction_label == "SHORT" and trail_stop is not None and bars[j].h >= trail_stop:
+                    exit_idx = j
+                    exit_reason = "stop_loss"
+                    break
+                if stage == "breakeven" and pnl_per_lot <= 0:
+                    exit_idx = j
+                    exit_reason = "breakeven"
+                    break
+
+                if stage == "trailing":
+                    # same dip-and-reclaim pattern as the entry trigger,
+                    # continued through the trade: each completed cycle
+                    # ratchets the structural stop up (LONG) / down (SHORT)
+                    # to its own extreme, never loosening it.
+                    if direction_label == "LONG":
+                        if trail_dipped and j_close > j_band_hi:
+                            if trail_dip_extreme is not None:
+                                trail_stop = max(trail_stop, trail_dip_extreme) if trail_stop is not None else trail_dip_extreme
+                            trail_dipped = False
+                            trail_dip_extreme = None
+                        elif j_close < j_band_lo:
+                            trail_dip_extreme = bars[j].l if trail_dip_extreme is None else min(trail_dip_extreme, bars[j].l)
+                            trail_dipped = True
+                    else:
+                        if trail_dipped and j_close < j_band_lo:
+                            if trail_dip_extreme is not None:
+                                trail_stop = min(trail_stop, trail_dip_extreme) if trail_stop is not None else trail_dip_extreme
+                            trail_dipped = False
+                            trail_dip_extreme = None
+                        elif j_close > j_band_hi:
+                            trail_dip_extreme = bars[j].h if trail_dip_extreme is None else max(trail_dip_extreme, bars[j].h)
+                            trail_dipped = True
 
             if exit_idx is None:
                 exit_idx = len(bars) - 1
