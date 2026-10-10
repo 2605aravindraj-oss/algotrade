@@ -46,14 +46,17 @@ close -- the same look-ahead class already fixed there.
 EXIT: three stages on the option's own premium P&L, so an early loser
 still gets cut quickly but a winner isn't capped:
 
-  1. INITIAL -- below BREAKEVEN_RS (default 300) profit: the only exits
-     are the structural dip-stop (the index's own low at the dip that
-     triggered the setup, e.g. the 12:10 bar's low for the 2026-10-06
-     12:15 LONG) and a trend flip (EMA9/EMA20 cross against the
-     position -- the cloud changing color).
-  2. BREAKEVEN -- once premium profit reaches BREAKEVEN_RS: the stop
-     also moves to the option's own entry price, so from here the
-     worst case is flat, not a loss.
+  1. INITIAL -- below BREAKEVEN_RS profit: exits are a fixed premium
+     stop-loss (STOP_LOSS_RS, default Rs 300/lot) or a trend flip
+     (EMA9/EMA20 cross against the position -- the cloud changing
+     color). (An earlier version used the structural dip-low/dip-high
+     itself as the initial stop; that's now reserved for the TRAILING
+     stage below, where it rides the trend instead of capping risk.)
+  2. BREAKEVEN -- once premium profit reaches BREAKEVEN_RS (default
+     300): the stop also moves to the option's own entry price, so
+     from here the worst case is flat, not a loss (the fixed
+     STOP_LOSS_RS stop still applies underneath it, though breakeven
+     is normally tighter).
   3. TRAILING -- once premium profit reaches TARGET_RS (default 600):
      the exit switches to the structural index stop, now ratcheted
      every time a later bar repeats the SAME dip-and-reclaim pattern
@@ -92,6 +95,7 @@ UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 EMA_FAST = 9
 EMA_SLOW = 20
 ATR_PERIOD = 14
+STOP_LOSS_RS = 300.0      # fixed premium loss (Rs/lot) that cuts the trade before breakeven
 BREAKEVEN_RS = 300.0      # premium profit (Rs/lot) at which the stop moves to breakeven
 TARGET_RS = 600.0         # premium profit (Rs/lot) at which the stop switches to structural trailing
 PREMIUM_TRAIL_PCT = 0.4   # once trailing, exit if profit retraces this fraction from its peak
@@ -289,26 +293,31 @@ def run(
                 premium_j = bar_j[4] if bar_j else entry_price
                 pnl_per_lot = (premium_j - entry_price) * lot_size
 
+                if stage in ("initial", "breakeven") and pnl_per_lot <= -STOP_LOSS_RS:
+                    exit_idx = j
+                    exit_reason = "stop_loss"
+                    break
+
                 if stage == "initial" and pnl_per_lot >= BREAKEVEN_RS:
                     stage = "breakeven"
                 if stage == "breakeven" and pnl_per_lot >= TARGET_RS:
                     stage = "trailing"
                     peak_pnl = pnl_per_lot
 
-                if direction_label == "LONG" and trail_stop is not None and bars[j].l <= trail_stop:
-                    exit_idx = j
-                    exit_reason = "stop_loss"
-                    break
-                if direction_label == "SHORT" and trail_stop is not None and bars[j].h >= trail_stop:
-                    exit_idx = j
-                    exit_reason = "stop_loss"
-                    break
                 if stage == "breakeven" and pnl_per_lot <= 0:
                     exit_idx = j
                     exit_reason = "breakeven"
                     break
 
                 if stage == "trailing":
+                    if direction_label == "LONG" and trail_stop is not None and bars[j].l <= trail_stop:
+                        exit_idx = j
+                        exit_reason = "stop_loss"
+                        break
+                    if direction_label == "SHORT" and trail_stop is not None and bars[j].h >= trail_stop:
+                        exit_idx = j
+                        exit_reason = "stop_loss"
+                        break
                     # the structural stop alone can lag a fast premium
                     # move (the index's own swing structure is coarser
                     # than the option's own price action), so also trail
