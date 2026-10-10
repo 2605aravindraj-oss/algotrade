@@ -43,37 +43,19 @@ helper identical to macd_histogram_1min_dualstop_options.py's, since
 _resample labels a multi-minute bar by its bucket start, not its
 close -- the same look-ahead class already fixed there.
 
-EXIT: three stages on the option's own premium P&L, so an early loser
-still gets cut quickly but a winner isn't capped:
+EXIT: a fixed rupee P&L stop-loss/target on the option premium (x
+lot_size), same convention as every sl_rs/target_rs module in this
+codebase -- STOP_LOSS_RS (default 300) or TARGET_RS (default 600),
+whichever hits first, else force-flat at FORCE_FLAT_TIME (15:25). Only
+one position open at a time.
 
-  1. INITIAL -- below BREAKEVEN_RS profit: exits are a fixed premium
-     stop-loss (STOP_LOSS_RS, default Rs 300/lot) or a trend flip
-     (EMA9/EMA20 cross against the position -- the cloud changing
-     color). (An earlier version used the structural dip-low/dip-high
-     itself as the initial stop; that's now reserved for the TRAILING
-     stage below, where it rides the trend instead of capping risk.)
-  2. BREAKEVEN -- once premium profit reaches BREAKEVEN_RS (default
-     300): the stop also moves to the option's own entry price, so
-     from here the worst case is flat, not a loss (the fixed
-     STOP_LOSS_RS stop still applies underneath it, though breakeven
-     is normally tighter).
-  3. TRAILING -- once premium profit reaches TARGET_RS (default 600):
-     the exit switches to the structural index stop, now ratcheted
-     every time a later bar repeats the SAME dip-and-reclaim pattern
-     that triggered the entry (a fresh, higher pullback low for a
-     LONG, ratcheted up, never loosened) -- riding the trend instead
-     of capping the winner at a fixed rupee move. ALONGSIDE that, the
-     premium's own peak P&L since trailing began is tracked, and the
-     trade also exits if profit retraces more than PREMIUM_TRAIL_PCT
-     (default 40%) from that peak, floored at TARGET_RS -- because the
-     index's own swing structure is coarser than the option's price
-     action, and a fast premium spike can fully round-trip before the
-     structural stop ever catches it (as happened on 2026-10-06's
-     12:15 LONG: +1,111 unrealized by 12:45, then a loss by 14:30,
-     with the index trend technically still intact throughout).
-
-Force-flat at FORCE_FLAT_TIME (15:25) regardless of stage. Only one
-position open at a time.
+(Two later variants were tried and backed out after testing worse on
+the 2026-09-08..10-06 sample: a purely structural stop keyed to the
+dip's own low/high (-3,605.81 net, 33% win rate -- the closest
+competitor, kept as the baseline above), and a 3-stage
+initial/breakeven/structural-trailing exit meant to let winners run
+(-4,778.92 to -7,960.30 net across variants). The simple fixed
+Rs 300/Rs 600 tested best of all of them.)
 
 STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
@@ -95,10 +77,8 @@ UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 EMA_FAST = 9
 EMA_SLOW = 20
 ATR_PERIOD = 14
-STOP_LOSS_RS = 300.0      # fixed premium loss (Rs/lot) that cuts the trade before breakeven
-BREAKEVEN_RS = 300.0      # premium profit (Rs/lot) at which the stop moves to breakeven
-TARGET_RS = 600.0         # premium profit (Rs/lot) at which the stop switches to structural trailing
-PREMIUM_TRAIL_PCT = 0.4   # once trailing, exit if profit retraces this fraction from its peak
+STOP_LOSS_RS = 300.0  # fixed premium loss (Rs/lot) that cuts the trade
+TARGET_RS = 600.0     # fixed premium profit (Rs/lot) that takes the trade
 
 
 @dataclass
@@ -210,10 +190,10 @@ def run(
                 dipped_down = False
                 dip_high = None
 
-            direction_label = opt_type = stop_level = None
+            direction_label = opt_type = None
             if trend_up:
                 if dipped_up and close > band_hi:
-                    direction_label, opt_type, stop_level = "LONG", "CE", dip_low
+                    direction_label, opt_type = "LONG", "CE"
                     dipped_up = False
                     dip_low = None
                 elif close < band_lo:
@@ -221,7 +201,7 @@ def run(
                     dipped_up = True
             elif trend_down:
                 if dipped_down and close < band_lo:
-                    direction_label, opt_type, stop_level = "SHORT", "PE", dip_high
+                    direction_label, opt_type = "SHORT", "PE"
                     dipped_down = False
                     dip_high = None
                 elif close > band_hi:
@@ -252,107 +232,23 @@ def run(
 
             exit_idx = None
             exit_reason = None
-            # three stages on the option's own premium P&L:
-            #   "initial"   -- below BREAKEVEN_RS profit: only the structural
-            #                  dip stop and a trend flip can exit.
-            #   "breakeven" -- >= BREAKEVEN_RS: stop also moves to the
-            #                  option's own entry price (give back to flat,
-            #                  not a loss).
-            #   "trailing"  -- >= TARGET_RS: stop lets go of the premium
-            #                  floor and switches fully to the structural
-            #                  index trail (ratcheted by each dip-and-reclaim
-            #                  cycle), riding the trend instead of capping it.
-            stage = "initial"
-            trail_stop = stop_level
-            trail_dipped = False   # a later bar, mid-trade, has re-dipped past the band
-            trail_dip_extreme: float | None = None  # its own low (LONG) / high (SHORT)
-            peak_pnl: float | None = None  # best premium P&L seen since entering "trailing"
             for j in range(entry_idx + 1, len(bars)):
                 j_decision_time = _decision_time(bars[j].ts)
                 if j_decision_time >= FORCE_FLAT_TIME:
                     exit_idx = j
                     exit_reason = "eod"
                     break
-
-                jf, js = ema9[j], ema20[j]
-                if jf is None or js is None:
-                    continue
-                j_band_hi, j_band_lo = max(jf, js), min(jf, js)
-                j_close = bars[j].c
-
-                if direction_label == "LONG" and not (jf > js):
-                    exit_idx = j
-                    exit_reason = "trend_flip"
-                    break
-                if direction_label == "SHORT" and not (jf < js):
-                    exit_idx = j
-                    exit_reason = "trend_flip"
-                    break
-
                 bar_j = _fill(opt_rows, j_decision_time)
                 premium_j = bar_j[4] if bar_j else entry_price
                 pnl_per_lot = (premium_j - entry_price) * lot_size
-
-                if stage in ("initial", "breakeven") and pnl_per_lot <= -STOP_LOSS_RS:
+                if pnl_per_lot <= -STOP_LOSS_RS:
                     exit_idx = j
                     exit_reason = "stop_loss"
                     break
-
-                if stage == "initial" and pnl_per_lot >= BREAKEVEN_RS:
-                    stage = "breakeven"
-                if stage == "breakeven" and pnl_per_lot >= TARGET_RS:
-                    stage = "trailing"
-                    peak_pnl = pnl_per_lot
-
-                if stage == "breakeven" and pnl_per_lot <= 0:
+                if pnl_per_lot >= TARGET_RS:
                     exit_idx = j
-                    exit_reason = "breakeven"
+                    exit_reason = "target"
                     break
-
-                if stage == "trailing":
-                    if direction_label == "LONG" and trail_stop is not None and bars[j].l <= trail_stop:
-                        exit_idx = j
-                        exit_reason = "stop_loss"
-                        break
-                    if direction_label == "SHORT" and trail_stop is not None and bars[j].h >= trail_stop:
-                        exit_idx = j
-                        exit_reason = "stop_loss"
-                        break
-                    # the structural stop alone can lag a fast premium
-                    # move (the index's own swing structure is coarser
-                    # than the option's own price action), so also trail
-                    # the premium's own peak P&L: give back no more than
-                    # PREMIUM_TRAIL_PCT of the best profit seen since
-                    # trailing began, floored at TARGET_RS so this can
-                    # never cut in below where trailing itself started.
-                    peak_pnl = pnl_per_lot if peak_pnl is None else max(peak_pnl, pnl_per_lot)
-                    premium_floor = max(TARGET_RS, peak_pnl * (1 - PREMIUM_TRAIL_PCT))
-                    if pnl_per_lot <= premium_floor:
-                        exit_idx = j
-                        exit_reason = "premium_trail"
-                        break
-                    # same dip-and-reclaim pattern as the entry trigger,
-                    # continued through the trade: each completed cycle
-                    # ratchets the structural stop up (LONG) / down (SHORT)
-                    # to its own extreme, never loosening it.
-                    if direction_label == "LONG":
-                        if trail_dipped and j_close > j_band_hi:
-                            if trail_dip_extreme is not None:
-                                trail_stop = max(trail_stop, trail_dip_extreme) if trail_stop is not None else trail_dip_extreme
-                            trail_dipped = False
-                            trail_dip_extreme = None
-                        elif j_close < j_band_lo:
-                            trail_dip_extreme = bars[j].l if trail_dip_extreme is None else min(trail_dip_extreme, bars[j].l)
-                            trail_dipped = True
-                    else:
-                        if trail_dipped and j_close < j_band_lo:
-                            if trail_dip_extreme is not None:
-                                trail_stop = min(trail_stop, trail_dip_extreme) if trail_stop is not None else trail_dip_extreme
-                            trail_dipped = False
-                            trail_dip_extreme = None
-                        elif j_close > j_band_hi:
-                            trail_dip_extreme = bars[j].h if trail_dip_extreme is None else max(trail_dip_extreme, bars[j].h)
-                            trail_dipped = True
 
             if exit_idx is None:
                 exit_idx = len(bars) - 1
