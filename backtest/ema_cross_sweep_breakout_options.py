@@ -1,8 +1,8 @@
 """Backtest: NIFTY 50 spot candles, mark the EMA(9)/EMA(20) crossover
 candle's own range, then switch to 1-minute candles and wait for a
 sweep of that range's near edge followed by a breakout of its far
-edge -- through real ATM NIFTY options, with a stop at the range's
-near edge and a fixed 1:2 risk-reward target.
+edge -- through real ATM NIFTY options, with a stop at the range's own
+midpoint (by default) and a fixed 1:2 risk-reward target.
 
 ZONE: computed on 5-minute NIFTY spot candles (not stated in the
 request; chosen because the 1-minute switch only makes sense as a
@@ -37,19 +37,24 @@ below the zone's low. Entry fills at the breakout bar's own close
 other module here.
 
 EXIT: the stop and target are INDEX PRICE levels, not an option
-premium percentage -- "stop at the range's low" is a chart level. For
-a LONG: stop_level = zone_low (the risk, in index points, is
-entry_close - zone_low); target_level = entry_close + 2 * risk, a
-flat 1:2 risk-reward on the index itself. The SHORT mirror: stop_level
-= zone_high, target_level = entry_close - 2 * (zone_high -
-entry_close). Later 1-minute index bars are scanned for the first one
-whose low/high trades through stop_level or target_level; whichever
-triggers, the option's own premium at that bar's decision time is
-what gets realized (same fill convention as every other sl_rs-style
-module here), not a synthetic index-based P&L. Forced flat at
-FORCE_FLAT_TIME (15:25) if neither level is hit first. Only one
-position open at a time; zone tracking continues underneath it, but
-no new entry fires until flat.
+premium percentage -- a chart level, not a Rs figure. stop_at_midpoint
+(default True): the stop sits at the zone's own midpoint, (zone_low +
+zone_high) / 2, rather than its far-from-entry edge -- tighter than
+the original "stop at the swept edge" reading, since the breakout
+entry already happens well past the midpoint by construction (the
+sweep has to reach one edge, the breakout the other). Set
+stop_at_midpoint=False to go back to the original edge-level stop
+(zone_low for a LONG, zone_high for a SHORT). For a LONG: risk (index
+points) = entry_close - stop_level; target_level = entry_close +
+risk_reward * risk, a flat 1:risk_reward reward on the index itself
+(default 1:2). The SHORT mirror is symmetric. Later 1-minute index
+bars are scanned for the first one whose low/high trades through
+stop_level or target_level; whichever triggers, the option's own
+premium at that bar's decision time is what gets realized (same fill
+convention as every other sl_rs-style module here), not a synthetic
+index-based P&L. Forced flat at FORCE_FLAT_TIME (15:25) if neither
+level is hit first. Only one position open at a time; zone tracking
+continues underneath it, but no new entry fires until flat.
 
 STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
@@ -120,6 +125,7 @@ def run(
     ema_fast: int = EMA_FAST,
     ema_slow: int = EMA_SLOW,
     risk_reward: float = RISK_REWARD,
+    stop_at_midpoint: bool = True,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -205,7 +211,8 @@ def run(
                     pending["swept"] = True
                 if pending["swept"] and close > pending["zone_high"] and not skip_entries_today:
                     direction_label, opt_type = "LONG", "CE"
-                    stop_level = pending["zone_low"]
+                    zone_mid = (pending["zone_low"] + pending["zone_high"]) / 2
+                    stop_level = zone_mid if stop_at_midpoint else pending["zone_low"]
                     target_level = close + risk_reward * (close - stop_level)
                     pending = None
             else:
@@ -213,7 +220,8 @@ def run(
                     pending["swept"] = True
                 if pending["swept"] and close < pending["zone_low"] and not skip_entries_today:
                     direction_label, opt_type = "SHORT", "PE"
-                    stop_level = pending["zone_high"]
+                    zone_mid = (pending["zone_low"] + pending["zone_high"]) / 2
+                    stop_level = zone_mid if stop_at_midpoint else pending["zone_high"]
                     target_level = close - risk_reward * (stop_level - close)
                     pending = None
 
