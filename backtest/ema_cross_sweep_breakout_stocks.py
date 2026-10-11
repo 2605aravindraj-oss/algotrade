@@ -66,7 +66,7 @@ EMA_FAST = 9
 EMA_SLOW = 20
 RISK_REWARD = 2.0
 CAPITAL_PER_TRADE = 50_000.0
-SWEEP_TOLERANCE_PCT = 0.05
+SWEEP_TOLERANCE_PCT = 0.01
 
 
 def _drop_zero_volume(rows_1min: list[list]) -> list[list]:
@@ -116,11 +116,16 @@ def run_single(
     """Same zone/sweep/breakout logic as ema_cross_sweep_breakout_options.run(),
     on one stock's own cash instrument -- no options translation.
 
-    sweep_tolerance_pct (default 0.05%): the sweep check accepts a high/low
+    sweep_tolerance_pct (default 0.01%): the sweep check accepts a high/low
     that gets within this percentage of the zone edge, not just an exact
-    touch -- a 1-tick near-miss during real continuous trading (seen on
-    ONGC: high reached 221.25 against a 221.26 zone_high) shouldn't silently
-    strand the setup. The breakout close check stays exact."""
+    touch -- a genuine 1-tick near-miss during real continuous trading
+    (seen on ONGC: high reached 221.25 against a 221.26 zone_high, a
+    0.0045% gap) shouldn't silently strand the setup. Kept deliberately
+    tight: on TATASTEEL, a low of 173.34 against a 173.30 zone_low (a
+    0.023% gap, four ticks) is a genuine non-touch, not a precision
+    artifact, and must NOT count as swept -- 0.01% clears ONGC's gap with
+    room to spare while staying well under TATASTEEL's. The breakout
+    close check stays exact, no tolerance."""
     trading_days = upstox_client.get_daily_history(instrument_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -308,7 +313,7 @@ def screen_single(
 
     zones = _find_zones(zone_bars, ema_fast, ema_slow)
     zones_available = sorted(
-        ((datetime.fromisoformat(zone_bars[idx].ts) + timedelta(minutes=zone_minutes), direction, zlo, zhi)
+        ((datetime.fromisoformat(zone_bars[idx].ts) + timedelta(minutes=zone_minutes), direction, zlo, zhi, zone_bars[idx].ts)
          for idx, direction, zlo, zhi in zones),
         key=lambda x: x[0],
     )
@@ -322,9 +327,9 @@ def screen_single(
     for bar in bars:
         bar_dt = datetime.fromisoformat(bar.ts)
         while zone_cursor < len(zones_available) and zones_available[zone_cursor][0] <= bar_dt:
-            zone_ts, direction, zlo, zhi = zones_available[zone_cursor]
+            _, direction, zlo, zhi, zone_start_ts = zones_available[zone_cursor]
             pending = {"direction": direction, "zone_low": zlo, "zone_high": zhi, "swept": False,
-                       "zone_ts": zone_ts.isoformat(), "swept_ts": None}
+                       "zone_ts": zone_start_ts, "swept_ts": None}
             zone_cursor += 1
 
         if pending is not None:
