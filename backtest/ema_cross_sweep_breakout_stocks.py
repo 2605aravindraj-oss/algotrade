@@ -70,15 +70,34 @@ SWEEP_TOLERANCE_PCT = 0.05
 
 
 def _drop_zero_volume(rows_1min: list[list]) -> list[list]:
-    """NSE equities go quiet for ~14 minutes most days (around 15:15-15:28,
-    before the closing-auction print) -- a stretch of zero-volume bars that
-    just repeat the last traded price, followed by one huge-volume bar for
-    the auction match. Those zero-volume bars carry no real price
-    information: left in, they can falsely satisfy a sweep/breakout check
-    (a stale flat price "touching" a level) or get reported as the current
-    price by the live screener. Dropping them leaves EMA/zone/sweep/
-    breakout detection working off bars that reflect an actual trade."""
-    return [r for r in rows_1min if r[5] > 0]
+    """NSE equities go quiet for ~14 minutes most days (around 15:15-15:28)
+    -- a stretch of zero-volume bars that just repeat the last traded
+    price -- then print ONE large-volume bar for the closing auction
+    match, often at a different price than the last continuous trade
+    (seen on COALINDIA: flat at 410.35 with volume=0 from 15:15-15:28,
+    then a single O=H=L=C=411.55 bar at 15:29 with volume=748104). That
+    auction print is a real trade, but a one-off settlement match, not
+    continuous intraday trading -- left in, it can satisfy a sweep/
+    breakout check (or get reported as "last price") on a level that was
+    never actually traded through during the session. So this drops not
+    just the zero-volume bars but everything in a day from the START of
+    its first zero-volume stretch onward, auction print included --
+    continuous trading for that day is treated as ending there."""
+    by_day: dict[str, list] = {}
+    order: list[str] = []
+    for r in rows_1min:
+        day = r[0][:10]
+        if day not in by_day:
+            by_day[day] = []
+            order.append(day)
+        by_day[day].append(r)
+
+    out: list[list] = []
+    for day in order:
+        day_rows = by_day[day]
+        first_zero = next((i for i, r in enumerate(day_rows) if r[5] == 0), None)
+        out.extend(day_rows if first_zero is None else day_rows[:first_zero])
+    return out
 
 
 def run_single(
