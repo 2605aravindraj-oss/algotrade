@@ -60,6 +60,18 @@ STRIKE/EXPIRY: ATM = round_to_step(index close, strike_step), nearest
 expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
 an Upstox access token) for any day whose weekly contract has already
 rolled over.
+
+TREND FILTER (trend_filter=False by default): when enabled, gates
+entries by a longer EMA (trend_ema_period, default 45) computed on the
+same 5-minute zone_bars series the cross itself runs on -- same
+convention as supertrend_vwap_cross_options.py's own ema_filter_period.
+A LONG only fires while the latest no-lookahead-safe 5-minute close is
+above that trend EMA; a SHORT only fires while it's below. "Latest
+known" uses the same real-close-instant cursor technique as
+zones_available, so the filter never looks ahead. A signal that fails
+the filter is NOT discarded -- the zone stays pending (already swept,
+if it was) and keeps re-checking the breakout condition on later bars,
+so it can still fire once the trend catches up.
 """
 from __future__ import annotations
 
@@ -79,6 +91,7 @@ ENTRY_TIMEFRAME_MINUTES = 1
 EMA_FAST = 9
 EMA_SLOW = 20
 RISK_REWARD = 2.0
+TREND_EMA_PERIOD = 45
 
 
 @dataclass
@@ -126,6 +139,8 @@ def run(
     ema_slow: int = EMA_SLOW,
     risk_reward: float = RISK_REWARD,
     stop_at_midpoint: bool = True,
+    trend_filter: bool = False,
+    trend_ema_period: int = TREND_EMA_PERIOD,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -167,7 +182,7 @@ def run(
         all_1min.extend(rows)
     all_1min.sort(key=lambda r: r[0])
 
-    min_bars = ema_slow + 3
+    min_bars = max(ema_slow, trend_ema_period if trend_filter else 0) + 3
     if len(all_1min) < min_bars:
         return []
 
@@ -186,8 +201,20 @@ def run(
         key=lambda x: x[0],
     )
 
+    trend_available: list[tuple] = []
+    if trend_filter:
+        trend_closes = [b.c for b in zone_bars]
+        trend_ema = _ema(trend_closes, trend_ema_period)
+        trend_available = sorted(
+            ((datetime.fromisoformat(zone_bars[idx].ts) + timedelta(minutes=zone_minutes), close, te)
+             for idx, (close, te) in enumerate(zip(trend_closes, trend_ema)) if te is not None),
+            key=lambda x: x[0],
+        )
+
     trades: list[OptionTrade] = []
     zone_cursor = 0
+    trend_cursor = 0
+    trend_state: str | None = None  # "UP" / "DOWN", latest known as of this bar
     pending: dict | None = None  # {"direction","zone_low","zone_high","swept"}
 
     i = 0
@@ -203,13 +230,20 @@ def run(
             pending = {"direction": direction, "zone_low": zlo, "zone_high": zhi, "swept": False}
             zone_cursor += 1
 
+        while trend_cursor < len(trend_available) and trend_available[trend_cursor][0] <= bar_dt:
+            _, t_close, t_ema = trend_available[trend_cursor]
+            trend_state = "UP" if t_close > t_ema else "DOWN"
+            trend_cursor += 1
+
         direction_label = opt_type = stop_level = target_level = None
         if pending is not None:
             lo, hi, close = bars[i].l, bars[i].h, bars[i].c
+            trend_ok_long = (not trend_filter) or trend_state == "UP"
+            trend_ok_short = (not trend_filter) or trend_state == "DOWN"
             if pending["direction"] == "LONG":
                 if not pending["swept"] and lo <= pending["zone_low"]:
                     pending["swept"] = True
-                if pending["swept"] and close > pending["zone_high"] and not skip_entries_today:
+                if pending["swept"] and close > pending["zone_high"] and not skip_entries_today and trend_ok_long:
                     direction_label, opt_type = "LONG", "CE"
                     zone_mid = (pending["zone_low"] + pending["zone_high"]) / 2
                     stop_level = zone_mid if stop_at_midpoint else pending["zone_low"]
@@ -218,7 +252,7 @@ def run(
             else:
                 if not pending["swept"] and hi >= pending["zone_high"]:
                     pending["swept"] = True
-                if pending["swept"] and close < pending["zone_low"] and not skip_entries_today:
+                if pending["swept"] and close < pending["zone_low"] and not skip_entries_today and trend_ok_short:
                     direction_label, opt_type = "SHORT", "PE"
                     zone_mid = (pending["zone_low"] + pending["zone_high"]) / 2
                     stop_level = zone_mid if stop_at_midpoint else pending["zone_high"]
