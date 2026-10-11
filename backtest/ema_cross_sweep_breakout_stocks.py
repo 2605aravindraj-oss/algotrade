@@ -231,7 +231,9 @@ def screen_single(
     - "no_recent_zone": no EMA cross at all in the lookback window.
 
     Returns None if there isn't enough recent data to compute EMA(ema_slow)
-    on the zone timeframe.
+    on the zone timeframe. Every non-None result also carries
+    "chart_bars": the last 40 zone-timeframe OHLC bars as [ts,o,h,l,c], for
+    drawing a small candlestick chart of the setup without a second fetch.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     far_back = (datetime.now() - timedelta(days=lookback_days * 3 + 10)).strftime("%Y-%m-%d")
@@ -265,8 +267,9 @@ def screen_single(
          for idx, direction, zlo, zhi in zones),
         key=lambda x: x[0],
     )
+    chart_bars = [[b.ts, b.o, b.h, b.l, b.c] for b in zone_bars[-40:]]
     if not zones_available:
-        return {"status": "no_recent_zone", "last_price": bars[-1].c, "last_ts": bars[-1].ts}
+        return {"status": "no_recent_zone", "last_price": bars[-1].c, "last_ts": bars[-1].ts, "chart_bars": chart_bars}
 
     pending: dict | None = None
     last_fired: dict | None = None
@@ -313,7 +316,7 @@ def screen_single(
         return {
             "status": status, "direction": direction, "zone_low": zone_low, "zone_high": zone_high,
             "zone_ts": pending["zone_ts"], "swept_ts": pending["swept_ts"], "trigger_level": trigger_level,
-            "distance_pct": distance_pct, "last_price": last_price, "last_ts": last_ts,
+            "distance_pct": distance_pct, "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars,
         }
 
     if last_fired is not None:
@@ -322,10 +325,10 @@ def screen_single(
             "zone_low": last_fired["zone_low"], "zone_high": last_fired["zone_high"],
             "zone_ts": last_fired["zone_ts"], "swept_ts": last_fired["swept_ts"],
             "fired_ts": last_fired["fired_ts"], "fired_price": last_fired["fired_price"],
-            "last_price": last_price, "last_ts": last_ts,
+            "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars,
         }
 
-    return {"status": "no_recent_zone", "last_price": last_price, "last_ts": last_ts}
+    return {"status": "no_recent_zone", "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars}
 
 
 def screen(
