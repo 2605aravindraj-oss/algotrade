@@ -61,6 +61,16 @@ expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
 an Upstox access token) for any day whose weekly contract has already
 rolled over.
 
+FIXED-RUPEE EXIT (sl_rs/target_rs, both None by default): when both are
+set, they replace the index-level stop/target entirely -- the option
+position exits on its own premium P&L per lot, checked each entry-
+timeframe bar at that bar's decision time: pnl_per_lot = (premium -
+entry_premium) * lot_size, stop at <= -sl_rs, target at >= target_rs.
+Same convention as macd_histogram_turn_options.py and the other
+sl_rs-style modules here. risk_reward/stop_at_midpoint are ignored
+when this mode is active (stop_level/target_level are still computed
+from the zone but unused).
+
 TREND FILTER (trend_filter=False by default): when enabled, gates
 entries by a longer EMA (trend_ema_period, default 45) computed on the
 same 5-minute zone_bars series the cross itself runs on -- same
@@ -141,6 +151,8 @@ def run(
     stop_at_midpoint: bool = True,
     trend_filter: bool = False,
     trend_ema_period: int = TREND_EMA_PERIOD,
+    sl_rs: float | None = None,
+    target_rs: float | None = None,
     slippage_pct: float = 0.0,
     access_token: str | None = None,
 ) -> list[OptionTrade]:
@@ -291,6 +303,8 @@ def run(
         while day_end_idx + 1 < len(bars) and bars[day_end_idx + 1].ts[:10] == d:
             day_end_idx += 1
 
+        use_rupee_exit = sl_rs is not None and target_rs is not None
+
         exit_idx = None
         exit_reason = None
         for j in range(entry_idx + 1, day_end_idx + 1):
@@ -299,7 +313,17 @@ def run(
                 exit_idx = j
                 exit_reason = "eod"
                 break
-            if direction_label == "LONG":
+            if use_rupee_exit:
+                bar_j = _fill(opt_rows, j_decision_time)
+                premium_j = bar_j[4] if bar_j else entry_price
+                pnl_per_lot = (premium_j - entry_price) * lot_size
+                if pnl_per_lot <= -sl_rs:
+                    exit_idx, exit_reason = j, "stop_loss"
+                    break
+                if pnl_per_lot >= target_rs:
+                    exit_idx, exit_reason = j, "target"
+                    break
+            elif direction_label == "LONG":
                 if bars[j].l <= stop_level:
                     exit_idx, exit_reason = j, "stop_loss"
                     break
