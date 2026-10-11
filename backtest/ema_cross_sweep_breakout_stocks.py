@@ -66,6 +66,19 @@ EMA_FAST = 9
 EMA_SLOW = 20
 RISK_REWARD = 2.0
 CAPITAL_PER_TRADE = 50_000.0
+SWEEP_TOLERANCE_PCT = 0.05
+
+
+def _drop_zero_volume(rows_1min: list[list]) -> list[list]:
+    """NSE equities go quiet for ~14 minutes most days (around 15:15-15:28,
+    before the closing-auction print) -- a stretch of zero-volume bars that
+    just repeat the last traded price, followed by one huge-volume bar for
+    the auction match. Those zero-volume bars carry no real price
+    information: left in, they can falsely satisfy a sweep/breakout check
+    (a stale flat price "touching" a level) or get reported as the current
+    price by the live screener. Dropping them leaves EMA/zone/sweep/
+    breakout detection working off bars that reflect an actual trade."""
+    return [r for r in rows_1min if r[5] > 0]
 
 
 def run_single(
@@ -79,9 +92,16 @@ def run_single(
     risk_reward: float = RISK_REWARD,
     stop_at_midpoint: bool = True,
     capital_per_trade: float = CAPITAL_PER_TRADE,
+    sweep_tolerance_pct: float = SWEEP_TOLERANCE_PCT,
 ) -> list[Trade]:
     """Same zone/sweep/breakout logic as ema_cross_sweep_breakout_options.run(),
-    on one stock's own cash instrument -- no options translation."""
+    on one stock's own cash instrument -- no options translation.
+
+    sweep_tolerance_pct (default 0.05%): the sweep check accepts a high/low
+    that gets within this percentage of the zone edge, not just an exact
+    touch -- a 1-tick near-miss during real continuous trading (seen on
+    ONGC: high reached 221.25 against a 221.26 zone_high) shouldn't silently
+    strand the setup. The breakout close check stays exact."""
     trading_days = upstox_client.get_daily_history(instrument_key, from_date, to_date)
     trading_days.sort(key=lambda d: d["date"])
     if not trading_days:
@@ -99,6 +119,7 @@ def run_single(
         rows = sorted(cache.get_day_candles_cached(instrument_key, "1minute", day["date"], expired=False), key=lambda r: r[0])
         all_1min.extend(rows)
     all_1min.sort(key=lambda r: r[0])
+    all_1min = _drop_zero_volume(all_1min)
 
     min_bars = ema_slow + 3
     if len(all_1min) < min_bars:
@@ -139,7 +160,8 @@ def run_single(
         if pending is not None:
             lo, hi, close = bars[i].l, bars[i].h, bars[i].c
             if pending["direction"] == "LONG":
-                if not pending["swept"] and lo <= pending["zone_low"]:
+                sweep_level = pending["zone_low"] * (1 + sweep_tolerance_pct / 100)
+                if not pending["swept"] and lo <= sweep_level:
                     pending["swept"] = True
                 if pending["swept"] and close > pending["zone_high"] and not skip_entries_today:
                     direction_label = "LONG"
@@ -148,7 +170,8 @@ def run_single(
                     target_level = close + risk_reward * (close - stop_level)
                     pending = None
             else:
-                if not pending["swept"] and hi >= pending["zone_high"]:
+                sweep_level = pending["zone_high"] * (1 - sweep_tolerance_pct / 100)
+                if not pending["swept"] and hi >= sweep_level:
                     pending["swept"] = True
                 if pending["swept"] and close < pending["zone_low"] and not skip_entries_today:
                     direction_label = "SHORT"
@@ -216,11 +239,13 @@ def screen_single(
     ema_fast: int = EMA_FAST,
     ema_slow: int = EMA_SLOW,
     lookback_days: int = 15,
+    sweep_tolerance_pct: float = SWEEP_TOLERANCE_PCT,
 ) -> dict | None:
     """Live setup state for one stock -- NOT a backtest. Replays the same
     zone -> sweep -> breakout state machine as run_single() over the most
     recent `lookback_days` trading days, but reports where things stand
-    RIGHT NOW instead of simulating trades:
+    RIGHT NOW instead of simulating trades. See run_single()'s docstring
+    for sweep_tolerance_pct and the zero-volume filter (_drop_zero_volume):
 
     - "zone_marked": the latest EMA9/EMA20 cross is still unswept -- watch
       for price to sweep the near edge.
@@ -248,6 +273,7 @@ def screen_single(
         rows = sorted(cache.get_day_candles_cached(instrument_key, "1minute", day["date"], expired=False), key=lambda r: r[0])
         all_1min.extend(rows)
     all_1min.sort(key=lambda r: r[0])
+    all_1min = _drop_zero_volume(all_1min)
 
     min_bars = ema_slow + 3
     if len(all_1min) < min_bars:
@@ -285,14 +311,16 @@ def screen_single(
         if pending is not None:
             lo, hi, close = bar.l, bar.h, bar.c
             if pending["direction"] == "LONG":
-                if not pending["swept"] and lo <= pending["zone_low"]:
+                sweep_level = pending["zone_low"] * (1 + sweep_tolerance_pct / 100)
+                if not pending["swept"] and lo <= sweep_level:
                     pending["swept"] = True
                     pending["swept_ts"] = bar.ts
                 if pending["swept"] and close > pending["zone_high"]:
                     last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
                     pending = None
             else:
-                if not pending["swept"] and hi >= pending["zone_high"]:
+                sweep_level = pending["zone_high"] * (1 - sweep_tolerance_pct / 100)
+                if not pending["swept"] and hi >= sweep_level:
                     pending["swept"] = True
                     pending["swept_ts"] = bar.ts
                 if pending["swept"] and close < pending["zone_low"]:
