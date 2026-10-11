@@ -16,6 +16,13 @@ independent names instead of betting the whole book on one index's
 path -- the same open question ema_cloud_pullback_stocks.py asked of
 a different signal.
 
+INVALIDATION: if price closes through the far edge before the near edge
+is ever swept, that is NOT the sweep-then-breakout pattern -- it's just
+price drifting straight through the zone -- so the zone is voided right
+there (pending is cleared) rather than left eligible to fire if price
+later comes back and sweeps. The live screener reports this as its own
+"invalidated" status.
+
 ZONE/ENTRY: identical mechanics to the options module, per stock --
 EMA(9)/EMA(20) cross on the stock's own `zone_minutes` candles (default
 5) marks that crossover candle's [low, high] as the zone; once it's
@@ -193,6 +200,10 @@ def run_single(
                     stop_level = zone_mid if stop_at_midpoint else pending["zone_low"]
                     target_level = close + risk_reward * (close - stop_level)
                     pending = None
+                elif not pending["swept"] and close > pending["zone_high"]:
+                    # closed through the far edge before ever sweeping the
+                    # near edge -- not sweep-then-breakout, void the zone
+                    pending = None
             else:
                 sweep_level = pending["zone_high"] * (1 - sweep_tolerance_pct / 100)
                 if not pending["swept"] and hi >= sweep_level:
@@ -202,6 +213,8 @@ def run_single(
                     zone_mid = (pending["zone_low"] + pending["zone_high"]) / 2
                     stop_level = zone_mid if stop_at_midpoint else pending["zone_high"]
                     target_level = close - risk_reward * (stop_level - close)
+                    pending = None
+                elif not pending["swept"] and close < pending["zone_low"]:
                     pending = None
 
         if direction_label is None:
@@ -277,6 +290,9 @@ def screen_single(
       close through the far edge (the breakout trigger).
     - "breakout_fired": the breakout already happened and no new cross has
       superseded it -- shows how long ago.
+    - "invalidated": price closed through the far edge before ever
+      sweeping the near edge -- not the sweep-then-breakout pattern, the
+      zone is void.
     - "no_recent_zone": no EMA cross at all in the lookback window.
 
     Returns None if there isn't enough recent data to compute EMA(ema_slow)
@@ -323,6 +339,7 @@ def screen_single(
 
     pending: dict | None = None
     last_fired: dict | None = None
+    last_invalidated: dict | None = None
     zone_cursor = 0
     for bar in bars:
         bar_dt = datetime.fromisoformat(bar.ts)
@@ -339,16 +356,27 @@ def screen_single(
                 if not pending["swept"] and lo <= sweep_level:
                     pending["swept"] = True
                     pending["swept_ts"] = bar.ts
-                if pending["swept"] and close > pending["zone_high"]:
-                    last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                if pending["swept"]:
+                    if close > pending["zone_high"]:
+                        last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                        pending = None
+                elif close > pending["zone_high"]:
+                    # closed through the far edge before ever sweeping the
+                    # near edge -- this isn't the sweep-then-breakout
+                    # pattern, it's just drifting through; the setup is void
+                    last_invalidated = {**pending, "invalidated_ts": bar.ts, "invalidated_price": close}
                     pending = None
             else:
                 sweep_level = pending["zone_high"] * (1 - sweep_tolerance_pct / 100)
                 if not pending["swept"] and hi >= sweep_level:
                     pending["swept"] = True
                     pending["swept_ts"] = bar.ts
-                if pending["swept"] and close < pending["zone_low"]:
-                    last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                if pending["swept"]:
+                    if close < pending["zone_low"]:
+                        last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                        pending = None
+                elif close < pending["zone_low"]:
+                    last_invalidated = {**pending, "invalidated_ts": bar.ts, "invalidated_price": close}
                     pending = None
 
     last_bar = bars[-1]
@@ -371,12 +399,24 @@ def screen_single(
             "distance_pct": distance_pct, "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars,
         }
 
-    if last_fired is not None:
+    # pending is None: the most recent zone either fired or was invalidated
+    # (closed through the far edge before ever sweeping the near edge) --
+    # report whichever happened more recently.
+    if last_fired is not None and (last_invalidated is None or last_fired["fired_ts"] >= last_invalidated["invalidated_ts"]):
         return {
             "status": "breakout_fired", "direction": last_fired["direction"],
             "zone_low": last_fired["zone_low"], "zone_high": last_fired["zone_high"],
             "zone_ts": last_fired["zone_ts"], "swept_ts": last_fired["swept_ts"],
             "fired_ts": last_fired["fired_ts"], "fired_price": last_fired["fired_price"],
+            "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars,
+        }
+
+    if last_invalidated is not None:
+        return {
+            "status": "invalidated", "direction": last_invalidated["direction"],
+            "zone_low": last_invalidated["zone_low"], "zone_high": last_invalidated["zone_high"],
+            "zone_ts": last_invalidated["zone_ts"],
+            "invalidated_ts": last_invalidated["invalidated_ts"], "invalidated_price": last_invalidated["invalidated_price"],
             "last_price": last_price, "last_ts": last_ts, "chart_bars": chart_bars,
         }
 
