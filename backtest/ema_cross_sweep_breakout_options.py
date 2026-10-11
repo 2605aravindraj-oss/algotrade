@@ -61,6 +61,21 @@ expiry on/after the entry day. Uses the EXPIRED-instruments API (needs
 an Upstox access token) for any day whose weekly contract has already
 rolled over.
 
+TRAIL TARGET (trail_target=False by default): when enabled, drops the
+fixed 1:risk_reward target entirely and lets the position "ride the
+trend" instead -- a chandelier-style trailing stop. The initial risk
+(entry_close - stop_level for a LONG, stop_level - entry_close for a
+SHORT) is fixed at entry, same as always. From then on, each
+entry-timeframe bar tracks the running favorable extreme since entry
+(highest high for a LONG, lowest low for a SHORT) and the stop ratchets
+to extreme - initial_risk (LONG) / extreme + initial_risk (SHORT) --
+it only ever tightens toward price, never loosens back toward entry.
+Exit fires the first bar whose low/high trades through that trailing
+stop, or at FORCE_FLAT_TIME if never triggered. risk_reward is ignored
+when this is active (no target_level is computed at all). Incompatible
+with the fixed-rupee exit (sl_rs/target_rs) -- trail_target takes
+priority when both are set.
+
 FIXED-RUPEE EXIT (sl_rs/target_rs, both None by default): when both are
 set, they replace the index-level stop/target entirely -- the option
 position exits on its own premium P&L per lot, checked each entry-
@@ -149,6 +164,7 @@ def run(
     ema_slow: int = EMA_SLOW,
     risk_reward: float = RISK_REWARD,
     stop_at_midpoint: bool = True,
+    trail_target: bool = False,
     trend_filter: bool = False,
     trend_ema_period: int = TREND_EMA_PERIOD,
     sl_rs: float | None = None,
@@ -305,6 +321,10 @@ def run(
 
         use_rupee_exit = sl_rs is not None and target_rs is not None
 
+        initial_risk = (entry_close - stop_level) if direction_label == "LONG" else (stop_level - entry_close)
+        running_extreme = bars[entry_idx].h if direction_label == "LONG" else bars[entry_idx].l
+        trail_stop = stop_level
+
         exit_idx = None
         exit_reason = None
         for j in range(entry_idx + 1, day_end_idx + 1):
@@ -313,7 +333,20 @@ def run(
                 exit_idx = j
                 exit_reason = "eod"
                 break
-            if use_rupee_exit:
+            if trail_target:
+                if direction_label == "LONG":
+                    running_extreme = max(running_extreme, bars[j].h)
+                    trail_stop = max(trail_stop, running_extreme - initial_risk)
+                    if bars[j].l <= trail_stop:
+                        exit_idx, exit_reason = j, "stop_loss"
+                        break
+                else:
+                    running_extreme = min(running_extreme, bars[j].l)
+                    trail_stop = min(trail_stop, running_extreme + initial_risk)
+                    if bars[j].h >= trail_stop:
+                        exit_idx, exit_reason = j, "stop_loss"
+                        break
+            elif use_rupee_exit:
                 bar_j = _fill(opt_rows, j_decision_time)
                 premium_j = bar_j[4] if bar_j else entry_price
                 pnl_per_lot = (premium_j - entry_price) * lot_size
