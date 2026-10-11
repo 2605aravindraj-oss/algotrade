@@ -209,6 +209,147 @@ def run_single(
     return trades
 
 
+def screen_single(
+    instrument_key: str,
+    zone_minutes: int = ZONE_TIMEFRAME_MINUTES,
+    entry_minutes: int = ENTRY_TIMEFRAME_MINUTES,
+    ema_fast: int = EMA_FAST,
+    ema_slow: int = EMA_SLOW,
+    lookback_days: int = 15,
+) -> dict | None:
+    """Live setup state for one stock -- NOT a backtest. Replays the same
+    zone -> sweep -> breakout state machine as run_single() over the most
+    recent `lookback_days` trading days, but reports where things stand
+    RIGHT NOW instead of simulating trades:
+
+    - "zone_marked": the latest EMA9/EMA20 cross is still unswept -- watch
+      for price to sweep the near edge.
+    - "swept_pending_breakout": that zone has been swept -- watch for a
+      close through the far edge (the breakout trigger).
+    - "breakout_fired": the breakout already happened and no new cross has
+      superseded it -- shows how long ago.
+    - "no_recent_zone": no EMA cross at all in the lookback window.
+
+    Returns None if there isn't enough recent data to compute EMA(ema_slow)
+    on the zone timeframe.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    far_back = (datetime.now() - timedelta(days=lookback_days * 3 + 10)).strftime("%Y-%m-%d")
+    trading_days = upstox_client.get_daily_history(instrument_key, far_back, today)
+    trading_days.sort(key=lambda d: d["date"])
+    if not trading_days:
+        return None
+    trading_days = trading_days[-lookback_days:]
+
+    all_1min: list[list] = []
+    for day in trading_days:
+        rows = sorted(cache.get_day_candles_cached(instrument_key, "1minute", day["date"], expired=False), key=lambda r: r[0])
+        all_1min.extend(rows)
+    all_1min.sort(key=lambda r: r[0])
+
+    min_bars = ema_slow + 3
+    if len(all_1min) < min_bars:
+        return None
+
+    zone_rows = _resample(all_1min, zone_minutes) if zone_minutes > 1 else all_1min
+    if len(zone_rows) < min_bars:
+        return None
+    zone_bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in zone_rows]
+
+    entry_rows = _resample(all_1min, entry_minutes) if entry_minutes > 1 else all_1min
+    bars = [Bar(ts=r[0], o=r[1], h=r[2], l=r[3], c=r[4]) for r in entry_rows]
+
+    zones = _find_zones(zone_bars, ema_fast, ema_slow)
+    zones_available = sorted(
+        ((datetime.fromisoformat(zone_bars[idx].ts) + timedelta(minutes=zone_minutes), direction, zlo, zhi)
+         for idx, direction, zlo, zhi in zones),
+        key=lambda x: x[0],
+    )
+    if not zones_available:
+        return {"status": "no_recent_zone", "last_price": bars[-1].c, "last_ts": bars[-1].ts}
+
+    pending: dict | None = None
+    last_fired: dict | None = None
+    zone_cursor = 0
+    for bar in bars:
+        bar_dt = datetime.fromisoformat(bar.ts)
+        while zone_cursor < len(zones_available) and zones_available[zone_cursor][0] <= bar_dt:
+            zone_ts, direction, zlo, zhi = zones_available[zone_cursor]
+            pending = {"direction": direction, "zone_low": zlo, "zone_high": zhi, "swept": False,
+                       "zone_ts": zone_ts.isoformat(), "swept_ts": None}
+            zone_cursor += 1
+
+        if pending is not None:
+            lo, hi, close = bar.l, bar.h, bar.c
+            if pending["direction"] == "LONG":
+                if not pending["swept"] and lo <= pending["zone_low"]:
+                    pending["swept"] = True
+                    pending["swept_ts"] = bar.ts
+                if pending["swept"] and close > pending["zone_high"]:
+                    last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                    pending = None
+            else:
+                if not pending["swept"] and hi >= pending["zone_high"]:
+                    pending["swept"] = True
+                    pending["swept_ts"] = bar.ts
+                if pending["swept"] and close < pending["zone_low"]:
+                    last_fired = {**pending, "fired_ts": bar.ts, "fired_price": close}
+                    pending = None
+
+    last_bar = bars[-1]
+    last_price, last_ts = last_bar.c, last_bar.ts
+
+    if pending is not None:
+        zone_low, zone_high, direction = pending["zone_low"], pending["zone_high"], pending["direction"]
+        if not pending["swept"]:
+            status = "zone_marked"
+            trigger_level = zone_low if direction == "LONG" else zone_high
+            distance_pct = 100 * (last_price - trigger_level) / last_price
+        else:
+            status = "swept_pending_breakout"
+            trigger_level = zone_high if direction == "LONG" else zone_low
+            distance_pct = 100 * (trigger_level - last_price) / last_price if direction == "LONG" \
+                else 100 * (last_price - trigger_level) / last_price
+        return {
+            "status": status, "direction": direction, "zone_low": zone_low, "zone_high": zone_high,
+            "zone_ts": pending["zone_ts"], "swept_ts": pending["swept_ts"], "trigger_level": trigger_level,
+            "distance_pct": distance_pct, "last_price": last_price, "last_ts": last_ts,
+        }
+
+    if last_fired is not None:
+        return {
+            "status": "breakout_fired", "direction": last_fired["direction"],
+            "zone_low": last_fired["zone_low"], "zone_high": last_fired["zone_high"],
+            "zone_ts": last_fired["zone_ts"], "swept_ts": last_fired["swept_ts"],
+            "fired_ts": last_fired["fired_ts"], "fired_price": last_fired["fired_price"],
+            "last_price": last_price, "last_ts": last_ts,
+        }
+
+    return {"status": "no_recent_zone", "last_price": last_price, "last_ts": last_ts}
+
+
+def screen(
+    symbols: list[str] = NIFTY_50,
+    **kwargs,
+) -> list[dict]:
+    """screen_single() across every (resolvable) symbol in `symbols`.
+    Returns a list of {symbol, **screen_single() result}, skipping symbols
+    that can't be resolved or don't have enough recent data."""
+    keys = instruments.resolve_symbols(symbols)
+    results = []
+    for symbol in symbols:
+        key = keys.get(symbol)
+        if key is None:
+            continue
+        try:
+            state = screen_single(key, **kwargs)
+        except Exception:
+            continue
+        if state is not None:
+            results.append({"symbol": symbol, **state})
+    return results
+
+
 def run_screener(
     from_date: str,
     to_date: str,
